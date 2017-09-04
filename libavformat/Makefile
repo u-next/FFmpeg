@@ -612,3 +612,4 @@ TOOLS     = aviocat                                                     \
             probetest                                                   \
             seek_print                                                  \
             sidxindex                                                   \
+            moof_mapper
