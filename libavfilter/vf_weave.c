@@ -105,6 +105,12 @@ static int weave_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
     AVFrame *in = td->in;
     AVFrame *out = td->out;
 
+    // if an I-frame is encountered in hevc interlaced streams, its guaranteed to
+    // be the configured field.
+    if (in->pict_type == AV_PICTURE_TYPE_I) {
+        s->first_field = 1;
+    }
+
     const int weave = (s->double_weave && !(inl->frame_count_out & 1));
     const int field1 = weave ? s->first_field : (!s->first_field);
     const int field2 = weave ? (!s->first_field) : s->first_field;
