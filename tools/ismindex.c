@@ -47,13 +47,12 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "cmdutils.h"
-
 #include "libavformat/avformat.h"
 #include "libavformat/isom.h"
 #include "libavformat/os_support.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mathematics.h"
+#include "libavutil/mem.h"
 
 static int usage(const char *argv0, int ret)
 {
@@ -344,7 +343,7 @@ static int read_tfra(struct Tracks *tracks, int start_index, AVIOContext *f)
     }
     fieldlength = avio_rb32(f);
     track->chunks  = avio_rb32(f);
-    track->offsets = av_mallocz_array(track->chunks, sizeof(*track->offsets));
+    track->offsets = av_calloc(track->chunks, sizeof(*track->offsets));
     if (!track->offsets) {
         track->chunks = 0;
         ret = AVERROR(ENOMEM);
@@ -576,7 +575,7 @@ static int handle_file(struct Tracks *tracks, const char *file, int split,
             if (tracks->audio_track < 0)
                 tracks->audio_track = tracks->nb_tracks;
             tracks->nb_audio_tracks++;
-            track->channels    = st->codecpar->channels;
+            track->channels    = st->codecpar->ch_layout.nb_channels;
             track->sample_rate = st->codecpar->sample_rate;
             if (st->codecpar->codec_id == AV_CODEC_ID_AAC) {
                 track->fourcc    = "AACL";
@@ -792,8 +791,6 @@ int main(int argc, char **argv)
     char output_prefix_buf[2048];
     int split = 0, ismf = 0, i;
     struct Tracks tracks = { 0, .video_track = -1, .audio_track = -1 };
-
-    av_register_all();
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-n")) {

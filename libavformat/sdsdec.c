@@ -21,6 +21,7 @@
 
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 typedef struct SDSContext {
@@ -30,7 +31,7 @@ typedef struct SDSContext {
     void (*read_block)(const uint8_t *src, uint32_t *dst);
 } SDSContext;
 
-static int sds_probe(AVProbeData *p)
+static int sds_probe(const AVProbeData *p)
 {
     if (AV_RB32(p->buf) == 0xF07E0001 && p->buf[20] == 0xF7 &&
         p->buf[6] >= 8 && p->buf[6] <= 28)
@@ -43,7 +44,7 @@ static void byte2_read(const uint8_t *src, uint32_t *dst)
     int i;
 
     for (i = 0; i < 120; i += 2) {
-        unsigned sample = (src[i + 0] << 25) + (src[i + 1] << 18);
+        unsigned sample = ((unsigned)src[i + 0] << 25) + ((unsigned)src[i + 1] << 18);
 
         dst[i / 2] = sample;
     }
@@ -56,7 +57,7 @@ static void byte3_read(const uint8_t *src, uint32_t *dst)
     for (i = 0; i < 120; i += 3) {
         unsigned sample;
 
-        sample = (src[i + 0] << 25) | (src[i + 1] << 18) | (src[i + 2] << 11);
+        sample = ((unsigned)src[i + 0] << 25) | ((unsigned)src[i + 1] << 18) | ((unsigned)src[i + 2] << 11);
         dst[i / 3] = sample;
     }
 }
@@ -68,7 +69,7 @@ static void byte4_read(const uint8_t *src, uint32_t *dst)
     for (i = 0; i < 120; i += 4) {
         unsigned sample;
 
-        sample = (src[i + 0] << 25) | (src[i + 1] << 18) | (src[i + 2] << 11) | (src[i + 3] << 4);
+        sample = ((unsigned)src[i + 0] << 25) | ((unsigned)src[i + 1] << 18) | ((unsigned)src[i + 2] << 11) | ((unsigned)src[i + 3] << 4);
         dst[i / 4] = sample;
     }
 }
@@ -110,9 +111,9 @@ static int sds_read_header(AVFormatContext *ctx)
     avio_skip(pb, 11);
 
     st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
-    st->codecpar->channels = 1;
+    st->codecpar->ch_layout.nb_channels = 1;
     st->codecpar->sample_rate = sample_period ? 1000000000 / sample_period : 16000;
-    st->duration = (avio_size(pb) - 21) / (127) * s->size / 4;
+    st->duration = av_rescale((avio_size(pb) - 21) / 127,  s->size, 4);
 
     avpriv_set_pts_info(st, 64, 1, st->codecpar->sample_rate);
 
@@ -153,13 +154,13 @@ static int sds_read_packet(AVFormatContext *ctx, AVPacket *pkt)
     return ret;
 }
 
-AVInputFormat ff_sds_demuxer = {
-    .name           = "sds",
-    .long_name      = NULL_IF_CONFIG_SMALL("MIDI Sample Dump Standard"),
+const FFInputFormat ff_sds_demuxer = {
+    .p.name         = "sds",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("MIDI Sample Dump Standard"),
+    .p.extensions   = "sds",
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .priv_data_size = sizeof(SDSContext),
     .read_probe     = sds_probe,
     .read_header    = sds_read_header,
     .read_packet    = sds_read_packet,
-    .extensions     = "sds",
-    .flags          = AVFMT_GENERIC_INDEX,
 };

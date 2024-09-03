@@ -23,9 +23,10 @@
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
 #include "avio.h"
+#include "demux.h"
 #include "internal.h"
 
-static int fsb_probe(AVProbeData *p)
+static int fsb_probe(const AVProbeData *p)
 {
     if (memcmp(p->buf, "FSB", 3) || p->buf[3] - '0' < 1 || p->buf[3] - '0' > 5)
         return 0;
@@ -41,6 +42,7 @@ static int fsb_read_header(AVFormatContext *s)
     int64_t offset;
     AVCodecParameters *par;
     AVStream *st = avformat_new_stream(s, NULL);
+    int ret;
 
     avio_skip(pb, 3); // "FSB"
     version = avio_r8(pb) - '0';
@@ -67,30 +69,30 @@ static int fsb_read_header(AVFormatContext *s)
         if (par->sample_rate <= 0)
             return AVERROR_INVALIDDATA;
         avio_skip(pb, 6);
-        par->channels    = avio_rl16(pb);
-        if (!par->channels)
+        par->ch_layout.nb_channels = avio_rl16(pb);
+        if (!par->ch_layout.nb_channels)
             return AVERROR_INVALIDDATA;
 
         if (format & 0x00000100) {
             par->codec_id    = AV_CODEC_ID_PCM_S16LE;
-            par->block_align = 4096 * par->channels;
+            par->block_align = 4096 * par->ch_layout.nb_channels;
         } else if (format & 0x00400000) {
             par->bits_per_coded_sample = 4;
             par->codec_id    = AV_CODEC_ID_ADPCM_IMA_WAV;
-            par->block_align = 36 * par->channels;
+            par->block_align = 36 * par->ch_layout.nb_channels;
         } else if (format & 0x00800000) {
             par->codec_id    = AV_CODEC_ID_ADPCM_PSX;
-            par->block_align = 16 * par->channels;
+            par->block_align = 16 * par->ch_layout.nb_channels;
         } else if (format & 0x02000000) {
             par->codec_id    = AV_CODEC_ID_ADPCM_THP;
-            par->block_align = 8 * par->channels;
-            if (par->channels > INT_MAX / 32)
+            par->block_align = 8 * par->ch_layout.nb_channels;
+            if (par->ch_layout.nb_channels > INT_MAX / 32)
                 return AVERROR_INVALIDDATA;
-            ff_alloc_extradata(par, 32 * par->channels);
-            if (!par->extradata)
-                return AVERROR(ENOMEM);
+            ret = ff_alloc_extradata(par, 32 * par->ch_layout.nb_channels);
+            if (ret < 0)
+                return ret;
             avio_seek(pb, 0x68, SEEK_SET);
-            for (c = 0; c < par->channels; c++) {
+            for (c = 0; c < par->ch_layout.nb_channels; c++) {
                 avio_read(pb, par->extradata + 32 * c, 32);
                 avio_skip(pb, 14);
             }
@@ -124,30 +126,30 @@ static int fsb_read_header(AVFormatContext *s)
             return AVERROR_INVALIDDATA;
         avio_skip(pb, 6);
 
-        par->channels    = avio_rl16(pb);
-        if (!par->channels)
+        par->ch_layout.nb_channels = avio_rl16(pb);
+        if (!par->ch_layout.nb_channels)
             return AVERROR_INVALIDDATA;
 
         switch (par->codec_id) {
         case AV_CODEC_ID_XMA2:
-            ff_alloc_extradata(par, 34);
-            if (!par->extradata)
-                return AVERROR(ENOMEM);
+            ret = ff_alloc_extradata(par, 34);
+            if (ret < 0)
+                return ret;
             memset(par->extradata, 0, 34);
             par->block_align = 2048;
             break;
         case AV_CODEC_ID_ADPCM_THP:
-            if (par->channels > INT_MAX / 32)
+            if (par->ch_layout.nb_channels > INT_MAX / 32)
                 return AVERROR_INVALIDDATA;
-            ff_alloc_extradata(par, 32 * par->channels);
-            if (!par->extradata)
-                return AVERROR(ENOMEM);
+            ret = ff_alloc_extradata(par, 32 * par->ch_layout.nb_channels);
+            if (ret < 0)
+                return ret;
             avio_seek(pb, 0x80, SEEK_SET);
-            for (c = 0; c < par->channels; c++) {
+            for (c = 0; c < par->ch_layout.nb_channels; c++) {
                 avio_read(pb, par->extradata + 32 * c, 32);
                 avio_skip(pb, 14);
             }
-            par->block_align = 8 * par->channels;
+            par->block_align = 8 * par->ch_layout.nb_channels;
             break;
         }
     } else {
@@ -155,7 +157,6 @@ static int fsb_read_header(AVFormatContext *s)
     }
 
     avio_skip(pb, offset - avio_tell(pb));
-    s->internal->data_offset = avio_tell(pb);
 
     avpriv_set_pts_info(st, 64, 1, par->sample_rate);
 
@@ -173,14 +174,14 @@ static int fsb_read_packet(AVFormatContext *s, AVPacket *pkt)
 
     pos = avio_tell(s->pb);
     if (par->codec_id == AV_CODEC_ID_ADPCM_THP &&
-               par->channels > 1) {
+        par->ch_layout.nb_channels > 1) {
         int i, ch;
 
         ret = av_new_packet(pkt, par->block_align);
         if (ret < 0)
             return ret;
         for (i = 0; i < 4; i++) {
-            for (ch = 0; ch < par->channels; ch++) {
+            for (ch = 0; ch < par->ch_layout.nb_channels; ch++) {
                 pkt->data[ch * 8 + i * 2 + 0] = avio_r8(s->pb);
                 pkt->data[ch * 8 + i * 2 + 1] = avio_r8(s->pb);
             }
@@ -199,12 +200,12 @@ static int fsb_read_packet(AVFormatContext *s, AVPacket *pkt)
     return ret;
 }
 
-AVInputFormat ff_fsb_demuxer = {
-    .name        = "fsb",
-    .long_name   = NULL_IF_CONFIG_SMALL("FMOD Sample Bank"),
+const FFInputFormat ff_fsb_demuxer = {
+    .p.name         = "fsb",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("FMOD Sample Bank"),
+    .p.extensions   = "fsb",
+    .p.flags        = AVFMT_GENERIC_INDEX,
     .read_probe  = fsb_probe,
     .read_header = fsb_read_header,
     .read_packet = fsb_read_packet,
-    .extensions  = "fsb",
-    .flags       = AVFMT_GENERIC_INDEX,
 };

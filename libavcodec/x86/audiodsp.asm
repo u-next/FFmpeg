@@ -23,8 +23,8 @@
 
 SECTION .text
 
-%macro SCALARPRODUCT 0
 ; int ff_scalarproduct_int16(int16_t *v1, int16_t *v2, int order)
+INIT_XMM sse2
 cglobal scalarproduct_int16, 3,3,3, v1, v2, order
     add orderd, orderd
     add v1q, orderq
@@ -42,17 +42,26 @@ cglobal scalarproduct_int16, 3,3,3, v1, v2, order
     jl .loop
     HADDD   m2, m0
     movd   eax, m2
-%if mmsize == 8
-    emms
-%endif
     RET
-%endmacro
 
-INIT_MMX mmxext
-SCALARPRODUCT
-INIT_XMM sse2
-SCALARPRODUCT
-
+%if HAVE_AVX2_EXTERNAL
+INIT_YMM avx2
+cglobal scalarproduct_int16, 3,3,2, v1, v2, order
+    add orderd, orderd
+    add v1q, orderq
+    add v2q, orderq
+    neg orderq
+    pxor    m1, m1
+.loop:
+    movu    m0, [v1q + orderq]
+    pmaddwd m0, [v2q + orderq]
+    paddd   m1, m0
+    add     orderq, mmsize
+    jl .loop
+    HADDD   m1, m0
+    movd   eax, xm1
+    RET
+%endif
 
 ;-----------------------------------------------------------------------------
 ; void ff_vector_clip_int32(int32_t *dst, const int32_t *src, int32_t min,
@@ -62,7 +71,7 @@ SCALARPRODUCT
 ; %1 = number of xmm registers used
 ; %2 = number of inline load/process/store loops per asm loop
 ; %3 = process 4*mmsize (%3=0) or 8*mmsize (%3=1) bytes per loop
-; %4 = CLIPD function takes min/max as float instead of int (CLIPD_SSE2)
+; %4 = CLIPD function takes min/max as float instead of int (SSE2 version)
 ; %5 = suffix
 %macro VECTOR_CLIP_INT32 4-5
 cglobal vector_clip_int32%5, 5,5,%1, dst, src, min, max, len
@@ -114,18 +123,13 @@ cglobal vector_clip_int32%5, 5,5,%1, dst, src, min, max, len
     add     dstq, mmsize*4*(%2+%3)
     sub     lend, mmsize*(%2+%3)
     jg .loop
-    REP_RET
+    RET
 %endmacro
 
-INIT_MMX mmx
-%define CLIPD CLIPD_MMX
-VECTOR_CLIP_INT32 0, 1, 0, 0
 INIT_XMM sse2
 VECTOR_CLIP_INT32 6, 1, 0, 0, _int
-%define CLIPD CLIPD_SSE2
 VECTOR_CLIP_INT32 6, 2, 0, 1
 INIT_XMM sse4
-%define CLIPD CLIPD_SSE41
 %ifdef m8
 VECTOR_CLIP_INT32 11, 1, 1, 0
 %else

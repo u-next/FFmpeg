@@ -20,9 +20,8 @@
  */
 
 #include "libavcodec/bytestream.h"
-#include "libavutil/avstring.h"
 #include "libavutil/intfloat.h"
-#include "avformat.h"
+#include "libavutil/mem.h"
 
 #include "rtmppkt.h"
 #include "flv.h"
@@ -38,6 +37,12 @@ void ff_amf_write_number(uint8_t **dst, double val)
 {
     bytestream_put_byte(dst, AMF_DATA_TYPE_NUMBER);
     bytestream_put_be64(dst, av_double2int(val));
+}
+
+void ff_amf_write_array_start(uint8_t **dst, uint32_t length)
+{
+    bytestream_put_byte(dst, AMF_DATA_TYPE_ARRAY);
+    bytestream_put_be32(dst, length);
 }
 
 void ff_amf_write_string(uint8_t **dst, const char *str)
@@ -82,14 +87,6 @@ void ff_amf_write_object_end(uint8_t **dst)
      * AMF object should end with it and end marker
      */
     bytestream_put_be24(dst, AMF_DATA_TYPE_OBJECT_END);
-}
-
-int ff_amf_read_bool(GetByteContext *bc, int *val)
-{
-    if (bytestream2_get_byte(bc) != AMF_DATA_TYPE_BOOL)
-        return AVERROR_INVALIDDATA;
-    *val = bytestream2_get_byte(bc);
-    return 0;
 }
 
 int ff_amf_read_number(GetByteContext *bc, double *val)
@@ -382,6 +379,12 @@ int ff_rtmp_packet_write(URLContext *h, RTMPPacket *pkt,
     prev_pkt[pkt->channel_id].ts_field   = pkt->ts_field;
     prev_pkt[pkt->channel_id].extra      = pkt->extra;
 
+    // FIXME:
+    // Writing packets is currently not optimized to minimize system calls.
+    // Since system calls flush on exit which we cannot change in a system-independant way.
+    // We should fix this behavior and by writing packets in a single or in as few as possible system calls.
+    // Protocols like TCP and RTMP should benefit from this when enabling TCP_NODELAY.
+
     if ((ret = ffurl_write(h, pkt_hdr, p - pkt_hdr)) < 0)
         return ret;
     written = p - pkt_hdr + pkt->size;
@@ -437,7 +440,6 @@ static int amf_tag_skip(GetByteContext *gb)
 {
     AMFDataType type;
     unsigned nb   = -1;
-    int parse_key = 1;
 
     if (bytestream2_get_bytes_left(gb) < 1)
         return -1;
@@ -462,13 +464,12 @@ static int amf_tag_skip(GetByteContext *gb)
         bytestream2_skip(gb, 10);
         return 0;
     case AMF_DATA_TYPE_ARRAY:
-        parse_key = 0;
     case AMF_DATA_TYPE_MIXEDARRAY:
         nb = bytestream2_get_be32(gb);
     case AMF_DATA_TYPE_OBJECT:
-        while (nb-- > 0 || type != AMF_DATA_TYPE_ARRAY) {
+        while (type != AMF_DATA_TYPE_ARRAY || nb-- > 0) {
             int t;
-            if (parse_key) {
+            if (type != AMF_DATA_TYPE_ARRAY) {
                 int size = bytestream2_get_be16(gb);
                 if (!size) {
                     bytestream2_get_byte(gb);
@@ -569,14 +570,15 @@ int ff_amf_get_field_value(const uint8_t *data, const uint8_t *data_end,
     return amf_get_field_value2(&gb, name, dst, dst_size);
 }
 
+#ifdef DEBUG
 static const char* rtmp_packet_type(int type)
 {
     switch (type) {
     case RTMP_PT_CHUNK_SIZE:     return "chunk size";
     case RTMP_PT_BYTES_READ:     return "bytes read";
-    case RTMP_PT_PING:           return "ping";
-    case RTMP_PT_SERVER_BW:      return "server bandwidth";
-    case RTMP_PT_CLIENT_BW:      return "client bandwidth";
+    case RTMP_PT_USER_CONTROL:   return "user control";
+    case RTMP_PT_WINDOW_ACK_SIZE: return "window acknowledgement size";
+    case RTMP_PT_SET_PEER_BW:    return "set peer bandwidth";
     case RTMP_PT_AUDIO:          return "audio packet";
     case RTMP_PT_VIDEO:          return "video packet";
     case RTMP_PT_FLEX_STREAM:    return "Flex shared stream";
@@ -674,10 +676,10 @@ void ff_rtmp_packet_dump(void *ctx, RTMPPacket *p)
                 break;
             src += sz;
         }
-    } else if (p->type == RTMP_PT_SERVER_BW){
-        av_log(ctx, AV_LOG_DEBUG, "Server BW = %d\n", AV_RB32(p->data));
-    } else if (p->type == RTMP_PT_CLIENT_BW){
-        av_log(ctx, AV_LOG_DEBUG, "Client BW = %d\n", AV_RB32(p->data));
+    } else if (p->type == RTMP_PT_WINDOW_ACK_SIZE) {
+        av_log(ctx, AV_LOG_DEBUG, "Window acknowledgement size = %d\n", AV_RB32(p->data));
+    } else if (p->type == RTMP_PT_SET_PEER_BW) {
+        av_log(ctx, AV_LOG_DEBUG, "Set Peer BW = %d\n", AV_RB32(p->data));
     } else if (p->type != RTMP_PT_AUDIO && p->type != RTMP_PT_VIDEO && p->type != RTMP_PT_METADATA) {
         int i;
         for (i = 0; i < p->size; i++)
@@ -685,6 +687,7 @@ void ff_rtmp_packet_dump(void *ctx, RTMPPacket *p)
         av_log(ctx, AV_LOG_DEBUG, "\n");
     }
 }
+#endif
 
 int ff_amf_match_string(const uint8_t *data, int size, const char *str)
 {

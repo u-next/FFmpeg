@@ -31,13 +31,12 @@
  * data. 24-bit data is RGB24 and 32-bit data is RGB32.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "avcodec.h"
+#include "decode.h"
 #include "bytestream.h"
-#include "internal.h"
+#include "codec_internal.h"
 
 typedef struct QtrleContext {
     AVCodecContext *avctx;
@@ -155,6 +154,8 @@ static inline void qtrle_decode_2n4bpp(QtrleContext *s, int row_ptr,
         CHECK_PIXEL_PTR(0);
 
         while ((rle_code = (int8_t)bytestream2_get_byte(&s->g)) != -1) {
+            if (bytestream2_get_bytes_left(&s->g) < 1)
+                return;
             if (rle_code == 0) {
                 /* there's another skip code in the stream */
                 pixel_ptr += (num_pixels * (bytestream2_get_byte(&s->g) - 1));
@@ -210,6 +211,8 @@ static void qtrle_decode_8bpp(QtrleContext *s, int row_ptr, int lines_to_change)
         CHECK_PIXEL_PTR(0);
 
         while ((rle_code = (int8_t)bytestream2_get_byte(&s->g)) != -1) {
+            if (bytestream2_get_bytes_left(&s->g) < 1)
+                return;
             if (rle_code == 0) {
                 /* there's another skip code in the stream */
                 pixel_ptr += (4 * (bytestream2_get_byte(&s->g) - 1));
@@ -259,6 +262,8 @@ static void qtrle_decode_16bpp(QtrleContext *s, int row_ptr, int lines_to_change
         CHECK_PIXEL_PTR(0);
 
         while ((rle_code = (int8_t)bytestream2_get_byte(&s->g)) != -1) {
+            if (bytestream2_get_bytes_left(&s->g) < 1)
+                return;
             if (rle_code == 0) {
                 /* there's another skip code in the stream */
                 pixel_ptr += (bytestream2_get_byte(&s->g) - 1) * 2;
@@ -291,10 +296,11 @@ static void qtrle_decode_16bpp(QtrleContext *s, int row_ptr, int lines_to_change
 
 static void qtrle_decode_24bpp(QtrleContext *s, int row_ptr, int lines_to_change)
 {
-    int rle_code;
+    int rle_code, rle_code_half;
     int pixel_ptr;
     int row_inc = s->frame->linesize[0];
-    uint8_t r, g, b;
+    uint8_t b;
+    uint16_t rg;
     uint8_t *rgb = s->frame->data[0];
     int pixel_limit = s->frame->linesize[0] * s->avctx->height;
 
@@ -303,6 +309,8 @@ static void qtrle_decode_24bpp(QtrleContext *s, int row_ptr, int lines_to_change
         CHECK_PIXEL_PTR(0);
 
         while ((rle_code = (int8_t)bytestream2_get_byte(&s->g)) != -1) {
+            if (bytestream2_get_bytes_left(&s->g) < 1)
+                return;
             if (rle_code == 0) {
                 /* there's another skip code in the stream */
                 pixel_ptr += (bytestream2_get_byte(&s->g) - 1) * 3;
@@ -310,25 +318,31 @@ static void qtrle_decode_24bpp(QtrleContext *s, int row_ptr, int lines_to_change
             } else if (rle_code < 0) {
                 /* decode the run length code */
                 rle_code = -rle_code;
-                r = bytestream2_get_byte(&s->g);
-                g = bytestream2_get_byte(&s->g);
+                rg = bytestream2_get_ne16(&s->g);
                 b = bytestream2_get_byte(&s->g);
 
                 CHECK_PIXEL_PTR(rle_code * 3);
 
                 while (rle_code--) {
-                    rgb[pixel_ptr++] = r;
-                    rgb[pixel_ptr++] = g;
-                    rgb[pixel_ptr++] = b;
+                    AV_WN16(rgb + pixel_ptr, rg);
+                    rgb[pixel_ptr + 2] = b;
+                    pixel_ptr += 3;
                 }
             } else {
                 CHECK_PIXEL_PTR(rle_code * 3);
 
-                /* copy pixels directly to output */
-                while (rle_code--) {
-                    rgb[pixel_ptr++] = bytestream2_get_byte(&s->g);
-                    rgb[pixel_ptr++] = bytestream2_get_byte(&s->g);
-                    rgb[pixel_ptr++] = bytestream2_get_byte(&s->g);
+                rle_code_half = rle_code / 2;
+
+                while (rle_code_half--) { /* copy 2 raw rgb value at the same time */
+                    AV_WN32(rgb + pixel_ptr, bytestream2_get_ne32(&s->g)); /* rgbr */
+                    AV_WN16(rgb + pixel_ptr + 4, bytestream2_get_ne16(&s->g)); /* rgbr */
+                    pixel_ptr += 6;
+                }
+
+                if (rle_code % 2 != 0){ /* not even raw value */
+                    AV_WN16(rgb + pixel_ptr, bytestream2_get_ne16(&s->g));
+                    rgb[pixel_ptr + 2] = bytestream2_get_byte(&s->g);
+                    pixel_ptr += 3;
                 }
             }
         }
@@ -338,7 +352,7 @@ static void qtrle_decode_24bpp(QtrleContext *s, int row_ptr, int lines_to_change
 
 static void qtrle_decode_32bpp(QtrleContext *s, int row_ptr, int lines_to_change)
 {
-    int rle_code;
+    int rle_code, rle_code_half;
     int pixel_ptr;
     int row_inc = s->frame->linesize[0];
     unsigned int argb;
@@ -350,6 +364,8 @@ static void qtrle_decode_32bpp(QtrleContext *s, int row_ptr, int lines_to_change
         CHECK_PIXEL_PTR(0);
 
         while ((rle_code = (int8_t)bytestream2_get_byte(&s->g)) != -1) {
+            if (bytestream2_get_bytes_left(&s->g) < 1)
+                return;
             if (rle_code == 0) {
                 /* there's another skip code in the stream */
                 pixel_ptr += (bytestream2_get_byte(&s->g) - 1) * 4;
@@ -357,7 +373,7 @@ static void qtrle_decode_32bpp(QtrleContext *s, int row_ptr, int lines_to_change
             } else if (rle_code < 0) {
                 /* decode the run length code */
                 rle_code = -rle_code;
-                argb = bytestream2_get_be32(&s->g);
+                argb = bytestream2_get_ne32(&s->g);
 
                 CHECK_PIXEL_PTR(rle_code * 4);
 
@@ -369,10 +385,15 @@ static void qtrle_decode_32bpp(QtrleContext *s, int row_ptr, int lines_to_change
                 CHECK_PIXEL_PTR(rle_code * 4);
 
                 /* copy pixels directly to output */
-                while (rle_code--) {
-                    argb = bytestream2_get_be32(&s->g);
-                    AV_WN32A(rgb + pixel_ptr, argb);
-                    pixel_ptr  += 4;
+                rle_code_half = rle_code / 2;
+                while (rle_code_half--) { /* copy 2 argb raw value at the same time */
+                    AV_WN64(rgb + pixel_ptr, bytestream2_get_ne64(&s->g));
+                    pixel_ptr += 8;
+                }
+
+                if (rle_code % 2 != 0){ /* not even raw value */
+                    AV_WN32A(rgb + pixel_ptr, bytestream2_get_ne32(&s->g));
+                    pixel_ptr += 4;
                 }
             }
         }
@@ -406,7 +427,7 @@ static av_cold int qtrle_decode_init(AVCodecContext *avctx)
         break;
 
     case 32:
-        avctx->pix_fmt = AV_PIX_FMT_RGB32;
+        avctx->pix_fmt = AV_PIX_FMT_ARGB;
         break;
 
     default:
@@ -422,44 +443,54 @@ static av_cold int qtrle_decode_init(AVCodecContext *avctx)
     return 0;
 }
 
-static int qtrle_decode_frame(AVCodecContext *avctx,
-                              void *data, int *got_frame,
-                              AVPacket *avpkt)
+static int qtrle_decode_frame(AVCodecContext *avctx, AVFrame *rframe,
+                              int *got_frame, AVPacket *avpkt)
 {
     QtrleContext *s = avctx->priv_data;
     int header, start_line;
     int height, row_ptr;
     int has_palette = 0;
-    int ret;
+    int duplicate = 0;
+    int ret, size;
 
     bytestream2_init(&s->g, avpkt->data, avpkt->size);
-    if ((ret = ff_reget_buffer(avctx, s->frame)) < 0)
-        return ret;
 
     /* check if this frame is even supposed to change */
-    if (avpkt->size < 8)
+    if (avpkt->size < 8) {
+        duplicate = 1;
         goto done;
+    }
 
     /* start after the chunk size */
-    bytestream2_seek(&s->g, 4, SEEK_SET);
+    size = bytestream2_get_be32(&s->g) & 0x3FFFFFFF;
+    if (size - avpkt->size >  size * (int64_t)avctx->discard_damaged_percentage / 100)
+        return AVERROR_INVALIDDATA;
+
 
     /* fetch the header */
     header = bytestream2_get_be16(&s->g);
 
     /* if a header is present, fetch additional decoding parameters */
     if (header & 0x0008) {
-        if (avpkt->size < 14)
+        if (avpkt->size < 14) {
+            duplicate = 1;
             goto done;
+        }
         start_line = bytestream2_get_be16(&s->g);
         bytestream2_skip(&s->g, 2);
         height     = bytestream2_get_be16(&s->g);
         bytestream2_skip(&s->g, 2);
-        if (height > s->avctx->height - start_line)
+        if (height > s->avctx->height - start_line) {
+            duplicate = 1;
             goto done;
+        }
     } else {
         start_line = 0;
         height     = s->avctx->height;
     }
+    if ((ret = ff_reget_buffer(avctx, s->frame, 0)) < 0)
+        return ret;
+
     row_ptr = s->frame->linesize[0] * start_line;
 
     switch (avctx->bits_per_coded_sample) {
@@ -506,27 +537,43 @@ static int qtrle_decode_frame(AVCodecContext *avctx,
     }
 
     if(has_palette) {
-        int size;
-        const uint8_t *pal = av_packet_get_side_data(avpkt, AV_PKT_DATA_PALETTE, &size);
-
-        if (pal && size == AVPALETTE_SIZE) {
-            s->frame->palette_has_changed = 1;
-            memcpy(s->pal, pal, AVPALETTE_SIZE);
-        } else if (pal) {
-            av_log(avctx, AV_LOG_ERROR, "Palette size %d is wrong\n", size);
-        }
+#if FF_API_PALETTE_HAS_CHANGED
+FF_DISABLE_DEPRECATION_WARNINGS
+        s->frame->palette_has_changed =
+#endif
+        ff_copy_palette(s->pal, avpkt, avctx);
+#if FF_API_PALETTE_HAS_CHANGED
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
 
         /* make the palette available on the way out */
         memcpy(s->frame->data[1], s->pal, AVPALETTE_SIZE);
     }
 
 done:
-    if ((ret = av_frame_ref(data, s->frame)) < 0)
+    if (!s->frame->data[0])
+        return AVERROR_INVALIDDATA;
+    if (duplicate) {
+        // ff_reget_buffer() isn't needed when frames don't change, so just update
+        // frame props.
+        ret = ff_decode_frame_props(avctx, s->frame);
+        if (ret < 0)
+            return ret;
+    }
+
+    if ((ret = av_frame_ref(rframe, s->frame)) < 0)
         return ret;
     *got_frame      = 1;
 
     /* always report that the buffer was completely consumed */
     return avpkt->size;
+}
+
+static void qtrle_decode_flush(AVCodecContext *avctx)
+{
+    QtrleContext *s = avctx->priv_data;
+
+    av_frame_unref(s->frame);
 }
 
 static av_cold int qtrle_decode_end(AVCodecContext *avctx)
@@ -538,14 +585,15 @@ static av_cold int qtrle_decode_end(AVCodecContext *avctx)
     return 0;
 }
 
-AVCodec ff_qtrle_decoder = {
-    .name           = "qtrle",
-    .long_name      = NULL_IF_CONFIG_SMALL("QuickTime Animation (RLE) video"),
-    .type           = AVMEDIA_TYPE_VIDEO,
-    .id             = AV_CODEC_ID_QTRLE,
+const FFCodec ff_qtrle_decoder = {
+    .p.name         = "qtrle",
+    CODEC_LONG_NAME("QuickTime Animation (RLE) video"),
+    .p.type         = AVMEDIA_TYPE_VIDEO,
+    .p.id           = AV_CODEC_ID_QTRLE,
     .priv_data_size = sizeof(QtrleContext),
     .init           = qtrle_decode_init,
     .close          = qtrle_decode_end,
-    .decode         = qtrle_decode_frame,
-    .capabilities   = AV_CODEC_CAP_DR1,
+    FF_CODEC_DECODE_CB(qtrle_decode_frame),
+    .flush          = qtrle_decode_flush,
+    .p.capabilities = AV_CODEC_CAP_DR1,
 };

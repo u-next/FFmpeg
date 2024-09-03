@@ -23,9 +23,8 @@
 #ifndef AVCODEC_HAP_H
 #define AVCODEC_HAP_H
 
+#include <stddef.h>
 #include <stdint.h>
-
-#include "libavutil/opt.h"
 
 #include "bytestream.h"
 #include "texturedsp.h"
@@ -34,6 +33,7 @@ enum HapTextureFormat {
     HAP_FMT_RGBDXT1   = 0x0B,
     HAP_FMT_RGBADXT5  = 0x0E,
     HAP_FMT_YCOCGDXT5 = 0x0F,
+    HAP_FMT_RGTC1     = 0x01,
 };
 
 enum HapCompressor {
@@ -51,16 +51,15 @@ enum HapSectionType {
 
 typedef struct HapChunk {
     enum HapCompressor compressor;
-    int compressed_offset;
+    uint32_t compressed_offset;
     size_t compressed_size;
     int uncompressed_offset;
     size_t uncompressed_size;
 } HapChunk;
 
 typedef struct HapContext {
-    AVClass *class;
+    const struct AVClass *class;
 
-    TextureDSPContext dxtc;
     GetByteContext gbc;
 
     enum HapTextureFormat opt_tex_fmt; /* Texture type (encoder only) */
@@ -71,17 +70,16 @@ typedef struct HapContext {
     HapChunk *chunks;
     int *chunk_results;      /* Results from threaded operations */
 
-    int tex_rat;             /* Compression ratio */
-    const uint8_t *tex_data; /* Compressed texture */
     uint8_t *tex_buf;        /* Buffer for compressed texture */
     size_t tex_size;         /* Size of the compressed texture */
 
     size_t max_snappy;       /* Maximum compressed size for snappy buffer */
 
-    int slice_count;         /* Number of slices for threaded operations */
+    int texture_count;      /* 2 for HAQA, 1 for other version */
+    int texture_section_size; /* size of the part of the texture section (for HAPQA) */
 
-    /* Pointer to the selected compress or decompress function */
-    int (*tex_fun)(uint8_t *dst, ptrdiff_t stride, const uint8_t *block);
+    TextureDSPThreadContext enc;
+    TextureDSPThreadContext dec[2];
 } HapContext;
 
 /*
@@ -95,5 +93,11 @@ int ff_hap_set_chunk_count(HapContext *ctx, int count, int first_in_frame);
  * Free resources associated with the context
  */
 av_cold void ff_hap_free_context(HapContext *ctx);
+
+/* The first three bytes are the size of the section past the header, or zero
+ * if the length is stored in the next long word. The fourth byte in the first
+ * long word indicates the type of the current section. */
+int ff_hap_parse_section_header(GetByteContext *gbc, int *section_size,
+                                enum HapSectionType *section_type);
 
 #endif /* AVCODEC_HAP_H */

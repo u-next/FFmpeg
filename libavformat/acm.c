@@ -21,10 +21,11 @@
 
 #include "libavutil/intreadwrite.h"
 #include "avformat.h"
+#include "demux.h"
 #include "rawdec.h"
 #include "internal.h"
 
-static int acm_probe(AVProbeData *p)
+static int acm_probe(const AVProbeData *p)
 {
     if (AV_RB32(p->buf) != 0x97280301)
         return 0;
@@ -44,32 +45,31 @@ static int acm_read_header(AVFormatContext *s)
     st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id   = AV_CODEC_ID_INTERPLAY_ACM;
 
-    ff_alloc_extradata(st->codecpar, 14);
-    if (!st->codecpar->extradata)
-        return AVERROR(ENOMEM);
-    ret = avio_read(s->pb, st->codecpar->extradata, 14);
-    if (ret < 10)
-        return ret < 0 ? ret : AVERROR_EOF;
+    ret = ff_get_extradata(s, st->codecpar, s->pb, 14);
+    if (ret < 0)
+        return ret;
 
-    st->codecpar->channels    = AV_RL16(st->codecpar->extradata +  8);
+    st->codecpar->ch_layout.nb_channels = AV_RL16(st->codecpar->extradata +  8);
     st->codecpar->sample_rate = AV_RL16(st->codecpar->extradata + 10);
-    if (st->codecpar->channels <= 0 || st->codecpar->sample_rate <= 0)
+    if (st->codecpar->ch_layout.nb_channels <= 0 || st->codecpar->sample_rate <= 0)
         return AVERROR_INVALIDDATA;
     st->start_time         = 0;
-    st->duration           = AV_RL32(st->codecpar->extradata +  4) / st->codecpar->channels;
-    st->need_parsing       = AVSTREAM_PARSE_FULL_RAW;
+    st->duration           = AV_RL32(st->codecpar->extradata +  4) / st->codecpar->ch_layout.nb_channels;
+    ffstream(st)->need_parsing = AVSTREAM_PARSE_FULL_RAW;
     avpriv_set_pts_info(st, 64, 1, st->codecpar->sample_rate);
 
     return 0;
 }
 
-AVInputFormat ff_acm_demuxer = {
-    .name           = "acm",
-    .long_name      = NULL_IF_CONFIG_SMALL("Interplay ACM"),
+const FFInputFormat ff_acm_demuxer = {
+    .p.name         = "acm",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Interplay ACM"),
+    .p.flags        = AVFMT_NOBINSEARCH | AVFMT_NOGENSEARCH | AVFMT_NO_BYTE_SEEK | AVFMT_NOTIMESTAMPS,
+    .p.extensions   = "acm",
+    .p.priv_class   = &ff_raw_demuxer_class,
     .read_probe     = acm_probe,
     .read_header    = acm_read_header,
     .read_packet    = ff_raw_read_partial_packet,
-    .flags          = AVFMT_NOBINSEARCH | AVFMT_NOGENSEARCH | AVFMT_NO_BYTE_SEEK | AVFMT_NOTIMESTAMPS,
-    .extensions     = "acm",
     .raw_codec_id   = AV_CODEC_ID_INTERPLAY_ACM,
+    .priv_data_size = sizeof(FFRawDemuxerContext),
 };

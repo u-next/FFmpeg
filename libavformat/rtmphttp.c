@@ -25,10 +25,9 @@
  */
 
 #include "libavutil/avstring.h"
-#include "libavutil/intfloat.h"
+#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/time.h"
-#include "internal.h"
 #include "http.h"
 #include "rtmp.h"
 
@@ -176,7 +175,7 @@ static int rtmp_http_close(URLContext *h)
     }
 
     av_freep(&rt->out_data);
-    ffurl_close(rt->stream);
+    ffurl_closep(&rt->stream);
 
     return ret;
 }

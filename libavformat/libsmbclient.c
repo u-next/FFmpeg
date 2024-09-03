@@ -20,9 +20,8 @@
 
 #include <libsmbclient.h>
 #include "libavutil/avstring.h"
+#include "libavutil/mem.h"
 #include "libavutil/opt.h"
-#include "avformat.h"
-#include "internal.h"
 #include "url.h"
 
 typedef struct {
@@ -166,7 +165,7 @@ static int libsmbc_read(URLContext *h, unsigned char *buf, int size)
         return ret;
     }
 
-    return bytes_read;
+    return bytes_read ? bytes_read : AVERROR_EOF;
 }
 
 static int libsmbc_write(URLContext *h, const unsigned char *buf, int size)

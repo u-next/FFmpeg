@@ -46,12 +46,14 @@ const AVCodecTag ff_codec_caf_tags[] = {
     { AV_CODEC_ID_GSM,             MKTAG('a','g','s','m') },
     { AV_CODEC_ID_GSM_MS,          MKTAG('m','s', 0, '1') },
     { AV_CODEC_ID_ILBC,            MKTAG('i','l','b','c') },
+    { AV_CODEC_ID_FLAC,            MKTAG('f','l','a','c') },
     { AV_CODEC_ID_MACE3,           MKTAG('M','A','C','3') },
     { AV_CODEC_ID_MACE6,           MKTAG('M','A','C','6') },
     { AV_CODEC_ID_MP1,             MKTAG('.','m','p','1') },
     { AV_CODEC_ID_MP2,             MKTAG('.','m','p','2') },
     { AV_CODEC_ID_MP3,             MKTAG('.','m','p','3') },
     { AV_CODEC_ID_MP3,             MKTAG('m','s', 0 ,'U') },
+    { AV_CODEC_ID_OPUS,            MKTAG('o','p','u','s') },
     { AV_CODEC_ID_PCM_ALAW,        MKTAG('a','l','a','w') },
     { AV_CODEC_ID_PCM_MULAW,       MKTAG('u','l','a','w') },
     { AV_CODEC_ID_QCELP,           MKTAG('Q','c','l','p') },
@@ -77,3 +79,4 @@ const AVCodecTag ff_codec_caf_tags[] = {
     { AV_CODEC_ID_NONE,            0 },
 };
 
+const AVCodecTag *const ff_caf_codec_tags_list[] = { ff_codec_caf_tags, NULL };

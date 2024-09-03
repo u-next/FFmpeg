@@ -20,6 +20,7 @@
 
 /** Based on the CURL SChannel module */
 
+#include "libavutil/mem.h"
 #include "avformat.h"
 #include "internal.h"
 #include "network.h"
@@ -112,6 +113,7 @@ static int tls_shutdown_client(URLContext *h)
                                              c->request_flags, 0, 0, NULL, 0, &c->ctxt_handle,
                                              &outbuf_desc, &c->context_flags, &c->ctxt_timestamp);
         if (sspi_ret == SEC_E_OK || sspi_ret == SEC_I_CONTEXT_EXPIRED) {
+            s->tcp->flags &= ~AVIO_FLAG_NONBLOCK;
             ret = ffurl_write(s->tcp, outbuf.pvBuffer, outbuf.cbBuffer);
             FreeContextBuffer(outbuf.pvBuffer);
             if (ret < 0 || ret != outbuf.cbBuffer)
@@ -138,8 +140,7 @@ static int tls_close(URLContext *h)
     av_freep(&c->dec_buf);
     c->dec_buf_size = c->dec_buf_offset = 0;
 
-    if (c->tls_shared.tcp)
-        ffurl_close(c->tls_shared.tcp);
+    ffurl_closep(&c->tls_shared.tcp);
     return 0;
 }
 
@@ -148,7 +149,7 @@ static int tls_client_handshake_loop(URLContext *h, int initial)
     TLSContext *c = h->priv_data;
     TLSShared *s = &c->tls_shared;
     SECURITY_STATUS sspi_ret;
-    SecBuffer outbuf[3];
+    SecBuffer outbuf[3] = { 0 };
     SecBufferDesc outbuf_desc;
     SecBuffer inbuf[2];
     SecBufferDesc inbuf_desc;
@@ -316,6 +317,7 @@ static int tls_client_handshake(URLContext *h)
         goto fail;
     }
 
+    s->tcp->flags &= ~AVIO_FLAG_NONBLOCK;
     ret = ffurl_write(s->tcp, outbuf.pvBuffer, outbuf.cbBuffer);
     FreeContextBuffer(outbuf.pvBuffer);
     if (ret < 0 || ret != outbuf.cbBuffer) {
@@ -389,10 +391,15 @@ static int tls_read(URLContext *h, uint8_t *buf, int len)
     SECURITY_STATUS sspi_ret = SEC_E_OK;
     SecBuffer inbuf[4];
     SecBufferDesc inbuf_desc;
-    int size, ret;
+    int size, ret = 0;
     int min_enc_buf_size = len + SCHANNEL_FREE_BUFFER_SIZE;
 
-    if (len <= c->dec_buf_offset)
+    /* If we have some left-over data from previous network activity,
+     * return it first in case it is enough. It may contain
+     * data that is required to know whether this connection
+     * is still required or not, esp. in case of HTTP keep-alive
+     * connections. */
+    if (c->dec_buf_offset > 0)
         goto cleanup;
 
     if (c->sspi_close_notify)
@@ -411,18 +418,25 @@ static int tls_read(URLContext *h, uint8_t *buf, int len)
             }
         }
 
+        s->tcp->flags &= ~AVIO_FLAG_NONBLOCK;
+        s->tcp->flags |= h->flags & AVIO_FLAG_NONBLOCK;
+
         ret = ffurl_read(s->tcp, c->enc_buf + c->enc_buf_offset,
                          c->enc_buf_size - c->enc_buf_offset);
-        if (ret < 0) {
+        if (ret == AVERROR_EOF) {
+            c->connection_closed = 1;
+            ret = 0;
+        } else if (ret == AVERROR(EAGAIN)) {
+            ret = 0;
+        } else if (ret < 0) {
             av_log(h, AV_LOG_ERROR, "Unable to read from socket\n");
             return ret;
-        } else if (ret == 0)
-            c->connection_closed = 1;
+        }
 
         c->enc_buf_offset += ret;
     }
 
-    while (c->enc_buf_offset > 0 && sspi_ret == SEC_E_OK && c->dec_buf_offset < len) {
+    while (c->enc_buf_offset > 0 && sspi_ret == SEC_E_OK) {
         /*  input buffer */
         init_sec_buffer(&inbuf[0], SECBUFFER_DATA, c->enc_buf, c->enc_buf_offset);
 
@@ -515,7 +529,7 @@ cleanup:
     if (ret == 0 && !c->connection_closed)
         ret = AVERROR(EAGAIN);
 
-    return ret < 0 ? ret : 0;
+    return ret < 0 ? ret : AVERROR_EOF;
 }
 
 static int tls_write(URLContext *h, const uint8_t *buf, int len)
@@ -557,8 +571,14 @@ static int tls_write(URLContext *h, const uint8_t *buf, int len)
     sspi_ret = EncryptMessage(&c->ctxt_handle, 0, &outbuf_desc, 0);
     if (sspi_ret == SEC_E_OK)  {
         len = outbuf[0].cbBuffer + outbuf[1].cbBuffer + outbuf[2].cbBuffer;
+
+        s->tcp->flags &= ~AVIO_FLAG_NONBLOCK;
+        s->tcp->flags |= h->flags & AVIO_FLAG_NONBLOCK;
+
         ret = ffurl_write(s->tcp, data, len);
-        if (ret < 0 || ret != len) {
+        if (ret == AVERROR(EAGAIN)) {
+            goto done;
+        } else if (ret < 0 || ret != len) {
             ret = AVERROR(EIO);
             av_log(h, AV_LOG_ERROR, "Writing encrypted data to socket failed\n");
             goto done;
@@ -583,6 +603,12 @@ static int tls_get_file_handle(URLContext *h)
     return ffurl_get_file_handle(c->tls_shared.tcp);
 }
 
+static int tls_get_short_seek(URLContext *h)
+{
+    TLSContext *s = h->priv_data;
+    return ffurl_get_short_seek(s->tls_shared.tcp);
+}
+
 static const AVOption options[] = {
     TLS_COMMON_OPTIONS(TLSContext, tls_shared),
     { NULL }
@@ -595,13 +621,14 @@ static const AVClass tls_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-const URLProtocol ff_tls_schannel_protocol = {
+const URLProtocol ff_tls_protocol = {
     .name           = "tls",
     .url_open2      = tls_open,
     .url_read       = tls_read,
     .url_write      = tls_write,
     .url_close      = tls_close,
     .url_get_file_handle = tls_get_file_handle,
+    .url_get_short_seek  = tls_get_short_seek,
     .priv_data_size = sizeof(TLSContext),
     .flags          = URL_PROTOCOL_FLAG_NETWORK,
     .priv_data_class = &tls_class,

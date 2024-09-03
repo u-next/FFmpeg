@@ -29,10 +29,11 @@
 
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
-#include "libavutil/internal.h"
+#include "libavutil/file_open.h"
+#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/tree.h"
-#include "avformat.h"
+#include "avio.h"
 #include <fcntl.h>
 #if HAVE_IO_H
 #include <io.h>
@@ -51,9 +52,10 @@ typedef struct CacheEntry {
     int size;
 } CacheEntry;
 
-typedef struct Context {
+typedef struct CacheContext {
     AVClass *class;
     int fd;
+    char *filename;
     struct AVTreeNode *root;
     int64_t logical_pos;
     int64_t cache_pos;
@@ -63,7 +65,7 @@ typedef struct Context {
     URLContext *inner;
     int64_t cache_hit, cache_miss;
     int read_ahead_limit;
-} Context;
+} CacheContext;
 
 static int cmp(const void *key, const void *node)
 {
@@ -72,8 +74,9 @@ static int cmp(const void *key, const void *node)
 
 static int cache_open(URLContext *h, const char *arg, int flags, AVDictionary **options)
 {
+    CacheContext *c = h->priv_data;
+    int ret;
     char *buffername;
-    Context *c= h->priv_data;
 
     av_strstart(arg, "cache:", &arg);
 
@@ -83,8 +86,12 @@ static int cache_open(URLContext *h, const char *arg, int flags, AVDictionary **
         return c->fd;
     }
 
-    unlink(buffername);
-    av_freep(&buffername);
+    ret = unlink(buffername);
+
+    if (ret >= 0)
+        av_freep(&buffername);
+    else
+        c->filename = buffername;
 
     return ffurl_open_whitelist(&c->inner, arg, flags, &h->interrupt_callback,
                                 options, h->protocol_whitelist, h->protocol_blacklist, h);
@@ -92,7 +99,7 @@ static int cache_open(URLContext *h, const char *arg, int flags, AVDictionary **
 
 static int add_entry(URLContext *h, const unsigned char *buf, int size)
 {
-    Context *c= h->priv_data;
+    CacheContext *c = h->priv_data;
     int64_t pos = -1;
     int ret;
     CacheEntry *entry = NULL, *next[2] = {NULL, NULL};
@@ -155,7 +162,7 @@ fail:
 
 static int cache_read(URLContext *h, unsigned char *buf, int size)
 {
-    Context *c= h->priv_data;
+    CacheContext *c = h->priv_data;
     CacheEntry *entry, *next[2] = {NULL, NULL};
     int64_t r;
 
@@ -201,7 +208,7 @@ static int cache_read(URLContext *h, unsigned char *buf, int size)
     }
 
     r = ffurl_read(c->inner, buf, size);
-    if (r == 0 && size>0) {
+    if (r == AVERROR_EOF && size>0) {
         c->is_true_eof = 1;
         av_assert0(c->end >= c->logical_pos);
     }
@@ -220,7 +227,7 @@ static int cache_read(URLContext *h, unsigned char *buf, int size)
 
 static int64_t cache_seek(URLContext *h, int64_t pos, int whence)
 {
-    Context *c= h->priv_data;
+    CacheContext *c = h->priv_data;
     int64_t ret;
 
     if (whence == AVSEEK_SIZE) {
@@ -263,7 +270,7 @@ resolve_eof:
                 if (whence == SEEK_SET)
                     size = FFMIN(sizeof(tmp), pos - c->logical_pos);
                 ret = cache_read(h, tmp, size);
-                if (ret == 0 && whence == SEEK_END) {
+                if (ret == AVERROR_EOF && whence == SEEK_END) {
                     av_assert0(c->is_true_eof);
                     goto resolve_eof;
                 }
@@ -291,20 +298,27 @@ static int enu_free(void *opaque, void *elem)
 
 static int cache_close(URLContext *h)
 {
-    Context *c= h->priv_data;
+    CacheContext *c = h->priv_data;
+    int ret;
 
     av_log(h, AV_LOG_INFO, "Statistics, cache hits:%"PRId64" cache misses:%"PRId64"\n",
            c->cache_hit, c->cache_miss);
 
     close(c->fd);
-    ffurl_close(c->inner);
+    if (c->filename) {
+        ret = unlink(c->filename);
+        if (ret < 0)
+            av_log(h, AV_LOG_ERROR, "Could not delete %s.\n", c->filename);
+        av_freep(&c->filename);
+    }
+    ffurl_closep(&c->inner);
     av_tree_enumerate(c->root, NULL, NULL, enu_free);
     av_tree_destroy(c->root);
 
     return 0;
 }
 
-#define OFFSET(x) offsetof(Context, x)
+#define OFFSET(x) offsetof(CacheContext, x)
 #define D AV_OPT_FLAG_DECODING_PARAM
 
 static const AVOption options[] = {
@@ -313,7 +327,7 @@ static const AVOption options[] = {
 };
 
 static const AVClass cache_context_class = {
-    .class_name = "Cache",
+    .class_name = "cache",
     .item_name  = av_default_item_name,
     .option     = options,
     .version    = LIBAVUTIL_VERSION_INT,
@@ -325,6 +339,6 @@ const URLProtocol ff_cache_protocol = {
     .url_read            = cache_read,
     .url_seek            = cache_seek,
     .url_close           = cache_close,
-    .priv_data_size      = sizeof(Context),
+    .priv_data_size      = sizeof(CacheContext),
     .priv_data_class     = &cache_context_class,
 };

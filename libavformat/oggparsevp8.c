@@ -61,7 +61,7 @@ static int vp8_header(AVFormatContext *s, int idx)
         avpriv_set_pts_info(st, 64, framerate.den, framerate.num);
         st->codecpar->codec_type = AVMEDIA_TYPE_VIDEO;
         st->codecpar->codec_id   = AV_CODEC_ID_VP8;
-        st->need_parsing      = AVSTREAM_PARSE_HEADERS;
+        ffstream(st)->need_parsing = AVSTREAM_PARSE_HEADERS;
         break;
     case 0x02:
         if (p[6] != 0x20)
@@ -125,7 +125,7 @@ static int vp8_packet(AVFormatContext *s, int idx)
         os->lastdts = vp8_gptopts(s, idx, os->granule, NULL) - duration;
         if(s->streams[idx]->start_time == AV_NOPTS_VALUE) {
             s->streams[idx]->start_time = os->lastpts;
-            if (s->streams[idx]->duration)
+            if (s->streams[idx]->duration && s->streams[idx]->duration != AV_NOPTS_VALUE)
                 s->streams[idx]->duration -= s->streams[idx]->start_time;
         }
     }

@@ -22,7 +22,7 @@
 
 #include "h264dec.h"
 #include "h264_ps.h"
-#include "hwaccel.h"
+#include "hwaccel_internal.h"
 #include "vaapi_decode.h"
 
 /**
@@ -93,14 +93,19 @@ typedef struct DPB {
  */
 static int dpb_add(DPB *dpb, const H264Picture *pic)
 {
-    int i;
+    int i, pic_frame_idx, merged = 0;
 
     if (dpb->size >= dpb->max_size)
         return -1;
 
+    pic_frame_idx = pic->long_ref ? pic->pic_id : pic->frame_num;
+
     for (i = 0; i < dpb->size; i++) {
         VAPictureH264 * const va_pic = &dpb->va_pics[i];
-        if (va_pic->picture_id == ff_vaapi_get_surface_id(pic->f)) {
+        int va_pic_long_ref = !!(va_pic->flags & VA_PICTURE_H264_LONG_TERM_REFERENCE);
+        if (va_pic->picture_id == ff_vaapi_get_surface_id(pic->f) &&
+            va_pic_long_ref == pic->long_ref &&
+            va_pic->frame_idx == pic_frame_idx) {
             VAPictureH264 temp_va_pic;
             fill_vaapi_pic(&temp_va_pic, pic, 0);
 
@@ -112,10 +117,13 @@ static int dpb_add(DPB *dpb, const H264Picture *pic)
                 } else {
                     va_pic->BottomFieldOrderCnt = temp_va_pic.BottomFieldOrderCnt;
                 }
+                merged = 1;
             }
-            return 0;
         }
     }
+
+    if (merged)
+        return 0;
 
     fill_vaapi_pic(&dpb->va_pics[dpb->size++], pic, 0);
     return 0;
@@ -256,9 +264,6 @@ static int vaapi_h264_start_frame(AVCodecContext          *avctx,
             .log2_max_pic_order_cnt_lsb_minus4      = sps->log2_max_poc_lsb - 4,
             .delta_pic_order_always_zero_flag       = sps->delta_pic_order_always_zero_flag,
         },
-        .num_slice_groups_minus1                    = pps->slice_group_count - 1,
-        .slice_group_map_type                       = pps->mb_slice_group_map_type,
-        .slice_group_change_rate_minus1             = 0, /* FMO is not implemented */
         .pic_init_qp_minus26                        = pps->init_qp - 26,
         .pic_init_qs_minus26                        = pps->init_qs - 26,
         .chroma_qp_index_offset                     = pps->chroma_qp_index_offset[0],
@@ -378,7 +383,7 @@ static int vaapi_h264_decode_slice(AVCodecContext *avctx,
                                        slice_param.chroma_offset_l1);
 
     err = ff_vaapi_decode_make_slice_buffer(avctx, pic,
-                                            &slice_param, sizeof(slice_param),
+                                            &slice_param, 1, sizeof(slice_param),
                                             buffer, size);
     if (err) {
         ff_vaapi_decode_cancel(avctx, pic);
@@ -388,17 +393,18 @@ static int vaapi_h264_decode_slice(AVCodecContext *avctx,
     return 0;
 }
 
-AVHWAccel ff_h264_vaapi_hwaccel = {
-    .name                 = "h264_vaapi",
-    .type                 = AVMEDIA_TYPE_VIDEO,
-    .id                   = AV_CODEC_ID_H264,
-    .pix_fmt              = AV_PIX_FMT_VAAPI,
+const FFHWAccel ff_h264_vaapi_hwaccel = {
+    .p.name               = "h264_vaapi",
+    .p.type               = AVMEDIA_TYPE_VIDEO,
+    .p.id                 = AV_CODEC_ID_H264,
+    .p.pix_fmt            = AV_PIX_FMT_VAAPI,
     .start_frame          = &vaapi_h264_start_frame,
     .end_frame            = &vaapi_h264_end_frame,
     .decode_slice         = &vaapi_h264_decode_slice,
     .frame_priv_data_size = sizeof(VAAPIDecodePicture),
     .init                 = &ff_vaapi_decode_init,
     .uninit               = &ff_vaapi_decode_uninit,
+    .frame_params         = &ff_vaapi_common_frame_params,
     .priv_data_size       = sizeof(VAAPIDecodeContext),
     .caps_internal        = HWACCEL_CAP_ASYNC_SAFE,
 };

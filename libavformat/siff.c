@@ -23,6 +23,7 @@
 #include "libavutil/intreadwrite.h"
 
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 #include "avio_internal.h"
 
@@ -62,7 +63,7 @@ typedef struct SIFFContext {
     uint8_t gmc[4];
 } SIFFContext;
 
-static int siff_probe(AVProbeData *p)
+static int siff_probe(const AVProbeData *p)
 {
     uint32_t tag = AV_RL32(p->buf + 8);
     /* check file header */
@@ -80,8 +81,7 @@ static int create_audio_stream(AVFormatContext *s, SIFFContext *c)
         return AVERROR(ENOMEM);
     ast->codecpar->codec_type            = AVMEDIA_TYPE_AUDIO;
     ast->codecpar->codec_id              = AV_CODEC_ID_PCM_U8;
-    ast->codecpar->channels              = 1;
-    ast->codecpar->channel_layout        = AV_CH_LAYOUT_MONO;
+    ast->codecpar->ch_layout             = (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
     ast->codecpar->bits_per_coded_sample = 8;
     ast->codecpar->sample_rate           = c->rate;
     avpriv_set_pts_info(ast, 16, 1, c->rate);
@@ -192,14 +192,20 @@ static int siff_read_header(AVFormatContext *s)
 static int siff_read_packet(AVFormatContext *s, AVPacket *pkt)
 {
     SIFFContext *c = s->priv_data;
+    int ret;
 
     if (c->has_video) {
         unsigned int size;
         if (c->cur_frame >= c->frames)
             return AVERROR_EOF;
         if (c->curstrm == -1) {
-            c->pktsize = avio_rl32(s->pb) - 4;
+            unsigned pktsize = avio_rl32(s->pb);
+            if (pktsize < 4)
+                return AVERROR_INVALIDDATA;
+            c->pktsize = pktsize - 4;
             c->flags   = avio_rl16(s->pb);
+            if (c->flags & VB_HAS_AUDIO && !c->has_audio)
+                return AVERROR_INVALIDDATA;
             c->gmcsize = (c->flags & VB_HAS_GMC) ? 4 : 0;
             if (c->gmcsize)
                 avio_read(s->pb, c->gmc, c->gmcsize);
@@ -213,13 +219,12 @@ static int siff_read_packet(AVFormatContext *s, AVPacket *pkt)
 
             size = c->pktsize - c->sndsize - c->gmcsize - 2;
             size = ffio_limit(s->pb, size);
-            if (av_new_packet(pkt, size + c->gmcsize + 2) < 0)
-                return AVERROR(ENOMEM);
+            if ((ret = av_new_packet(pkt, size + c->gmcsize + 2)) < 0)
+                return ret;
             AV_WL16(pkt->data, c->flags);
             if (c->gmcsize)
                 memcpy(pkt->data + 2, c->gmc, c->gmcsize);
             if (avio_read(s->pb, pkt->data + 2 + c->gmcsize, size) != size) {
-                av_packet_unref(pkt);
                 return AVERROR_INVALIDDATA;
             }
             pkt->stream_index = 0;
@@ -247,12 +252,12 @@ static int siff_read_packet(AVFormatContext *s, AVPacket *pkt)
     return pkt->size;
 }
 
-AVInputFormat ff_siff_demuxer = {
-    .name           = "siff",
-    .long_name      = NULL_IF_CONFIG_SMALL("Beam Software SIFF"),
+const FFInputFormat ff_siff_demuxer = {
+    .p.name         = "siff",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Beam Software SIFF"),
+    .p.extensions   = "vb,son",
     .priv_data_size = sizeof(SIFFContext),
     .read_probe     = siff_probe,
     .read_header    = siff_read_header,
     .read_packet    = siff_read_packet,
-    .extensions     = "vb,son",
 };

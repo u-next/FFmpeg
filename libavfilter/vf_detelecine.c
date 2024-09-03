@@ -28,8 +28,8 @@
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "avfilter.h"
+#include "filters.h"
 #include "formats.h"
-#include "internal.h"
 #include "video.h"
 
 typedef struct DetelecineContext {
@@ -58,11 +58,11 @@ typedef struct DetelecineContext {
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 static const AVOption detelecine_options[] = {
-    {"first_field", "select first field", OFFSET(first_field), AV_OPT_TYPE_INT,   {.i64=0}, 0, 1, FLAGS, "field"},
-        {"top",    "select top field first",                0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, "field"},
-        {"t",      "select top field first",                0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, "field"},
-        {"bottom", "select bottom field first",             0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, "field"},
-        {"b",      "select bottom field first",             0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, "field"},
+    {"first_field", "select first field", OFFSET(first_field), AV_OPT_TYPE_INT,   {.i64=0}, 0, 1, FLAGS, .unit = "field"},
+        {"top",    "select top field first",                0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, .unit = "field"},
+        {"t",      "select top field first",                0, AV_OPT_TYPE_CONST, {.i64=0}, 0, 0, FLAGS, .unit = "field"},
+        {"bottom", "select bottom field first",             0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, .unit = "field"},
+        {"b",      "select bottom field first",             0, AV_OPT_TYPE_CONST, {.i64=1}, 0, 0, FLAGS, .unit = "field"},
     {"pattern", "pattern that describe for how many fields a frame is to be displayed", OFFSET(pattern), AV_OPT_TYPE_STRING, {.str="23"}, 0, 0, FLAGS},
     {"start_frame", "position of first frame with respect to the pattern if stream is cut", OFFSET(start_frame), AV_OPT_TYPE_INT, {.i64=0}, 0, 13, FLAGS},
     {NULL}
@@ -124,19 +124,11 @@ static av_cold int init(AVFilterContext *ctx)
 
 static int query_formats(AVFilterContext *ctx)
 {
-    AVFilterFormats *pix_fmts = NULL;
-    int fmt, ret;
+    int reject_flags = AV_PIX_FMT_FLAG_BITSTREAM |
+                       AV_PIX_FMT_FLAG_PAL       |
+                       AV_PIX_FMT_FLAG_HWACCEL;
 
-    for (fmt = 0; av_pix_fmt_desc_get(fmt); fmt++) {
-        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(fmt);
-        if (!(desc->flags & AV_PIX_FMT_FLAG_HWACCEL ||
-              desc->flags & AV_PIX_FMT_FLAG_PAL     ||
-              desc->flags & AV_PIX_FMT_FLAG_BITSTREAM) &&
-             (ret = ff_add_format(&pix_fmts, fmt)) < 0)
-            return ret;
-    }
-
-    return ff_set_common_formats(ctx, pix_fmts);
+    return ff_set_common_formats(ctx, ff_formats_pixdesc_filter(0, reject_flags));
 }
 
 static int config_input(AVFilterLink *inlink)
@@ -170,10 +162,12 @@ static int config_input(AVFilterLink *inlink)
 
 static int config_output(AVFilterLink *outlink)
 {
+    FilterLink     *outl = ff_filter_link(outlink);
     AVFilterContext *ctx = outlink->src;
     DetelecineContext *s = ctx->priv;
     const AVFilterLink *inlink = ctx->inputs[0];
-    AVRational fps = inlink->frame_rate;
+    const FilterLink      *inl = ff_filter_link(ctx->inputs[0]);
+    AVRational fps = inl->frame_rate;
 
     if (!fps.num || !fps.den) {
         av_log(ctx, AV_LOG_ERROR, "The input needs a constant frame rate; "
@@ -182,9 +176,9 @@ static int config_output(AVFilterLink *outlink)
     }
     fps = av_mul_q(fps, av_inv_q(s->pts));
     av_log(ctx, AV_LOG_VERBOSE, "FPS: %d/%d -> %d/%d\n",
-           inlink->frame_rate.num, inlink->frame_rate.den, fps.num, fps.den);
+           inl->frame_rate.num, inl->frame_rate.den, fps.num, fps.den);
 
-    outlink->frame_rate = fps;
+    outl->frame_rate = fps;
     outlink->time_base = av_mul_q(inlink->time_base, s->pts);
     av_log(ctx, AV_LOG_VERBOSE, "TB: %d/%d -> %d/%d\n",
            inlink->time_base.num, inlink->time_base.den, outlink->time_base.num, outlink->time_base.den);
@@ -198,6 +192,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
 {
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
+    FilterLink *outl = ff_filter_link(outlink);
     DetelecineContext *s = ctx->priv;
     int i, len = 0, ret = 0, out = 0;
 
@@ -206,6 +201,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
 
     if (s->nskip_fields >= 2) {
         s->nskip_fields -= 2;
+        av_frame_free(&inpicref);
         return 0;
     } else if (s->nskip_fields >= 1) {
         for (i = 0; i < s->nb_planes; i++) {
@@ -216,6 +212,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
         }
         s->occupied = 1;
         s->nskip_fields--;
+        av_frame_free(&inpicref);
         return 0;
     }
 
@@ -335,7 +332,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *inpicref)
 
         av_frame_copy_props(frame, inpicref);
         frame->pts = ((s->start_time == AV_NOPTS_VALUE) ? 0 : s->start_time) +
-                     av_rescale(outlink->frame_count_in, s->ts_unit.num,
+                     av_rescale(outl->frame_count_in, s->ts_unit.num,
                                 s->ts_unit.den);
         ret = ff_filter_frame(outlink, frame);
     }
@@ -361,7 +358,6 @@ static const AVFilterPad detelecine_inputs[] = {
         .filter_frame  = filter_frame,
         .config_props  = config_input,
     },
-    { NULL }
 };
 
 static const AVFilterPad detelecine_outputs[] = {
@@ -370,17 +366,16 @@ static const AVFilterPad detelecine_outputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_detelecine = {
+const AVFilter ff_vf_detelecine = {
     .name          = "detelecine",
     .description   = NULL_IF_CONFIG_SMALL("Apply an inverse telecine pattern."),
     .priv_size     = sizeof(DetelecineContext),
     .priv_class    = &detelecine_class,
     .init          = init,
     .uninit        = uninit,
-    .query_formats = query_formats,
-    .inputs        = detelecine_inputs,
-    .outputs       = detelecine_outputs,
+    FILTER_INPUTS(detelecine_inputs),
+    FILTER_OUTPUTS(detelecine_outputs),
+    FILTER_QUERY_FUNC(query_formats),
 };

@@ -20,19 +20,20 @@
  */
 
 #include "libavutil/imgutils.h"
+#include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/opt.h"
 #include "avfilter.h"
-#include "formats.h"
-#include "internal.h"
+#include "filters.h"
 #include "video.h"
-#include "framesync2.h"
+#include "framesync.h"
 
 #define OFFSET(x) offsetof(HysteresisContext, x)
 #define FLAGS AV_OPT_FLAG_FILTERING_PARAM|AV_OPT_FLAG_VIDEO_PARAM
 
 typedef struct HysteresisContext {
     const AVClass *class;
+    FFFrameSync fs;
 
     int planes;
     int threshold;
@@ -40,7 +41,6 @@ typedef struct HysteresisContext {
     int width[4], height[4];
     int nb_planes;
     int depth;
-    FFFrameSync fs;
 
     uint8_t *map;
     uint32_t *xy;
@@ -58,33 +58,26 @@ static const AVOption hysteresis_options[] = {
     { NULL }
 };
 
-AVFILTER_DEFINE_CLASS(hysteresis);
-
-static int query_formats(AVFilterContext *ctx)
-{
-    static const enum AVPixelFormat pix_fmts[] = {
-        AV_PIX_FMT_YUVA444P, AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV440P,
-        AV_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ440P,
-        AV_PIX_FMT_YUVA422P, AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUVA420P, AV_PIX_FMT_YUV420P,
-        AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ420P,
-        AV_PIX_FMT_YUVJ411P, AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P,
-        AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV444P9,
-        AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV444P10,
-        AV_PIX_FMT_YUV420P12, AV_PIX_FMT_YUV422P12, AV_PIX_FMT_YUV444P12, AV_PIX_FMT_YUV440P12,
-        AV_PIX_FMT_YUV420P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV444P14,
-        AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16,
-        AV_PIX_FMT_YUVA420P9, AV_PIX_FMT_YUVA422P9, AV_PIX_FMT_YUVA444P9,
-        AV_PIX_FMT_YUVA420P10, AV_PIX_FMT_YUVA422P10, AV_PIX_FMT_YUVA444P10,
-        AV_PIX_FMT_YUVA420P16, AV_PIX_FMT_YUVA422P16, AV_PIX_FMT_YUVA444P16,
-        AV_PIX_FMT_GBRP, AV_PIX_FMT_GBRP9, AV_PIX_FMT_GBRP10,
-        AV_PIX_FMT_GBRP12, AV_PIX_FMT_GBRP14, AV_PIX_FMT_GBRP16,
-        AV_PIX_FMT_GBRAP, AV_PIX_FMT_GBRAP10, AV_PIX_FMT_GBRAP12, AV_PIX_FMT_GBRAP16,
-        AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY9, AV_PIX_FMT_GRAY10, AV_PIX_FMT_GRAY12, AV_PIX_FMT_GRAY16,
-        AV_PIX_FMT_NONE
-    };
-
-    return ff_set_common_formats(ctx, ff_make_format_list(pix_fmts));
-}
+static const enum AVPixelFormat pix_fmts[] = {
+    AV_PIX_FMT_YUVA444P, AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV440P,
+    AV_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ440P,
+    AV_PIX_FMT_YUVA422P, AV_PIX_FMT_YUV422P, AV_PIX_FMT_YUVA420P, AV_PIX_FMT_YUV420P,
+    AV_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ420P,
+    AV_PIX_FMT_YUVJ411P, AV_PIX_FMT_YUV411P, AV_PIX_FMT_YUV410P,
+    AV_PIX_FMT_YUV420P9, AV_PIX_FMT_YUV422P9, AV_PIX_FMT_YUV444P9,
+    AV_PIX_FMT_YUV420P10, AV_PIX_FMT_YUV422P10, AV_PIX_FMT_YUV444P10,
+    AV_PIX_FMT_YUV420P12, AV_PIX_FMT_YUV422P12, AV_PIX_FMT_YUV444P12, AV_PIX_FMT_YUV440P12,
+    AV_PIX_FMT_YUV420P14, AV_PIX_FMT_YUV422P14, AV_PIX_FMT_YUV444P14,
+    AV_PIX_FMT_YUV420P16, AV_PIX_FMT_YUV422P16, AV_PIX_FMT_YUV444P16,
+    AV_PIX_FMT_YUVA420P9, AV_PIX_FMT_YUVA422P9, AV_PIX_FMT_YUVA444P9,
+    AV_PIX_FMT_YUVA420P10, AV_PIX_FMT_YUVA422P10, AV_PIX_FMT_YUVA444P10,
+    AV_PIX_FMT_YUVA420P16, AV_PIX_FMT_YUVA422P16, AV_PIX_FMT_YUVA444P16,
+    AV_PIX_FMT_GBRP, AV_PIX_FMT_GBRP9, AV_PIX_FMT_GBRP10,
+    AV_PIX_FMT_GBRP12, AV_PIX_FMT_GBRP14, AV_PIX_FMT_GBRP16,
+    AV_PIX_FMT_GBRAP, AV_PIX_FMT_GBRAP10, AV_PIX_FMT_GBRAP12, AV_PIX_FMT_GBRAP16,
+    AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY9, AV_PIX_FMT_GRAY10, AV_PIX_FMT_GRAY12, AV_PIX_FMT_GRAY14, AV_PIX_FMT_GRAY16,
+    AV_PIX_FMT_NONE
+};
 
 static int process_frame(FFFrameSync *fs)
 {
@@ -94,8 +87,8 @@ static int process_frame(FFFrameSync *fs)
     AVFrame *out, *base, *alt;
     int ret;
 
-    if ((ret = ff_framesync2_get_frame(&s->fs, 0, &base, 0)) < 0 ||
-        (ret = ff_framesync2_get_frame(&s->fs, 1, &alt,  0)) < 0)
+    if ((ret = ff_framesync_get_frame(&s->fs, 0, &base, 0)) < 0 ||
+        (ret = ff_framesync_get_frame(&s->fs, 1, &alt,  0)) < 0)
         return ret;
 
     if (ctx->is_disabled) {
@@ -294,37 +287,27 @@ static int config_output(AVFilterLink *outlink)
     HysteresisContext *s = ctx->priv;
     AVFilterLink *base = ctx->inputs[0];
     AVFilterLink *alt = ctx->inputs[1];
+    FilterLink   *il = ff_filter_link(base);
+    FilterLink   *ol = ff_filter_link(outlink);
     FFFrameSyncIn *in;
     int ret;
 
-    if (base->format != alt->format) {
-        av_log(ctx, AV_LOG_ERROR, "inputs must be of same pixel format\n");
-        return AVERROR(EINVAL);
-    }
-    if (base->w                       != alt->w ||
-        base->h                       != alt->h ||
-        base->sample_aspect_ratio.num != alt->sample_aspect_ratio.num ||
-        base->sample_aspect_ratio.den != alt->sample_aspect_ratio.den) {
+    if (base->w != alt->w || base->h != alt->h) {
         av_log(ctx, AV_LOG_ERROR, "First input link %s parameters "
-               "(size %dx%d, SAR %d:%d) do not match the corresponding "
-               "second input link %s parameters (%dx%d, SAR %d:%d)\n",
+               "(size %dx%d) do not match the corresponding "
+               "second input link %s parameters (size %dx%d)\n",
                ctx->input_pads[0].name, base->w, base->h,
-               base->sample_aspect_ratio.num,
-               base->sample_aspect_ratio.den,
                ctx->input_pads[1].name,
-               alt->w, alt->h,
-               alt->sample_aspect_ratio.num,
-               alt->sample_aspect_ratio.den);
+               alt->w, alt->h);
         return AVERROR(EINVAL);
     }
 
     outlink->w = base->w;
     outlink->h = base->h;
-    outlink->time_base = base->time_base;
     outlink->sample_aspect_ratio = base->sample_aspect_ratio;
-    outlink->frame_rate = base->frame_rate;
+    ol->frame_rate = il->frame_rate;
 
-    if ((ret = ff_framesync2_init(&s->fs, ctx, 2)) < 0)
+    if ((ret = ff_framesync_init(&s->fs, ctx, 2)) < 0)
         return ret;
 
     in = s->fs.in;
@@ -339,23 +322,28 @@ static int config_output(AVFilterLink *outlink)
     s->fs.opaque   = s;
     s->fs.on_event = process_frame;
 
-    return ff_framesync2_configure(&s->fs);
+    ret = ff_framesync_configure(&s->fs);
+    outlink->time_base = s->fs.time_base;
+
+    return ret;
 }
 
 static int activate(AVFilterContext *ctx)
 {
     HysteresisContext *s = ctx->priv;
-    return ff_framesync2_activate(&s->fs);
+    return ff_framesync_activate(&s->fs);
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
     HysteresisContext *s = ctx->priv;
 
-    ff_framesync2_uninit(&s->fs);
+    ff_framesync_uninit(&s->fs);
     av_freep(&s->map);
     av_freep(&s->xy);
 }
+
+FRAMESYNC_DEFINE_CLASS(hysteresis, HysteresisContext, fs);
 
 static const AVFilterPad hysteresis_inputs[] = {
     {
@@ -367,7 +355,6 @@ static const AVFilterPad hysteresis_inputs[] = {
         .name         = "alt",
         .type         = AVMEDIA_TYPE_VIDEO,
     },
-    { NULL }
 };
 
 static const AVFilterPad hysteresis_outputs[] = {
@@ -376,18 +363,18 @@ static const AVFilterPad hysteresis_outputs[] = {
         .type          = AVMEDIA_TYPE_VIDEO,
         .config_props  = config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_hysteresis = {
+const AVFilter ff_vf_hysteresis = {
     .name          = "hysteresis",
     .description   = NULL_IF_CONFIG_SMALL("Grow first stream into second stream by connecting components."),
+    .preinit       = hysteresis_framesync_preinit,
     .priv_size     = sizeof(HysteresisContext),
     .uninit        = uninit,
-    .query_formats = query_formats,
     .activate      = activate,
-    .inputs        = hysteresis_inputs,
-    .outputs       = hysteresis_outputs,
+    FILTER_INPUTS(hysteresis_inputs),
+    FILTER_OUTPUTS(hysteresis_outputs),
+    FILTER_PIXFMTS_ARRAY(pix_fmts),
     .priv_class    = &hysteresis_class,
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
 };

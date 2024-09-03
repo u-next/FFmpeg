@@ -28,46 +28,50 @@
  */
 
 #define UNCHECKED_BITSTREAM_READER 1
-#include <limits.h>
+
+#include "config_components.h"
 
 #include "libavutil/attributes.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/internal.h"
 #include "libavutil/mathematics.h"
+#include "libavutil/mem_internal.h"
+#include "libavutil/thread.h"
 #include "avcodec.h"
 #include "mpegvideo.h"
 #include "h263.h"
 #include "h263data.h"
-#include "internal.h"
+#include "h263dec.h"
 #include "mathops.h"
 #include "mpegutils.h"
 #include "unary.h"
-#include "flv.h"
-#include "rv10.h"
+#include "rv10dec.h"
 #include "mpeg4video.h"
 #include "mpegvideodata.h"
+#include "mpegvideodec.h"
+#include "mpeg4videodec.h"
+#include "mpeg4videodefs.h"
 
 // The defines below define the number of bits that are read at once for
 // reading vlc values. Changing these may improve speed and data cache needs
 // be aware though that decreasing them may need the number of stages that is
 // passed to get_vlc* to be increased.
-#define MV_VLC_BITS 9
 #define H263_MBTYPE_B_VLC_BITS 6
 #define CBPC_B_VLC_BITS 3
 
-static const int h263_mb_type_b_map[15]= {
-    MB_TYPE_DIRECT2 | MB_TYPE_L0L1,
-    MB_TYPE_DIRECT2 | MB_TYPE_L0L1 | MB_TYPE_CBP,
-    MB_TYPE_DIRECT2 | MB_TYPE_L0L1 | MB_TYPE_CBP | MB_TYPE_QUANT,
-                      MB_TYPE_L0                                 | MB_TYPE_16x16,
-                      MB_TYPE_L0   | MB_TYPE_CBP                 | MB_TYPE_16x16,
-                      MB_TYPE_L0   | MB_TYPE_CBP | MB_TYPE_QUANT | MB_TYPE_16x16,
-                      MB_TYPE_L1                                 | MB_TYPE_16x16,
-                      MB_TYPE_L1   | MB_TYPE_CBP                 | MB_TYPE_16x16,
-                      MB_TYPE_L1   | MB_TYPE_CBP | MB_TYPE_QUANT | MB_TYPE_16x16,
-                      MB_TYPE_L0L1                               | MB_TYPE_16x16,
-                      MB_TYPE_L0L1 | MB_TYPE_CBP                 | MB_TYPE_16x16,
-                      MB_TYPE_L0L1 | MB_TYPE_CBP | MB_TYPE_QUANT | MB_TYPE_16x16,
+static const int16_t h263_mb_type_b_map[15]= {
+    MB_TYPE_DIRECT2 | MB_TYPE_BIDIR_MV,
+    MB_TYPE_DIRECT2 | MB_TYPE_BIDIR_MV    | MB_TYPE_CBP,
+    MB_TYPE_DIRECT2 | MB_TYPE_BIDIR_MV    | MB_TYPE_CBP | MB_TYPE_QUANT,
+                      MB_TYPE_FORWARD_MV                                | MB_TYPE_16x16,
+                      MB_TYPE_FORWARD_MV  | MB_TYPE_CBP                 | MB_TYPE_16x16,
+                      MB_TYPE_FORWARD_MV  | MB_TYPE_CBP | MB_TYPE_QUANT | MB_TYPE_16x16,
+                      MB_TYPE_BACKWARD_MV                               | MB_TYPE_16x16,
+                      MB_TYPE_BACKWARD_MV | MB_TYPE_CBP                 | MB_TYPE_16x16,
+                      MB_TYPE_BACKWARD_MV | MB_TYPE_CBP | MB_TYPE_QUANT | MB_TYPE_16x16,
+                      MB_TYPE_BIDIR_MV                                  | MB_TYPE_16x16,
+                      MB_TYPE_BIDIR_MV    | MB_TYPE_CBP                 | MB_TYPE_16x16,
+                      MB_TYPE_BIDIR_MV    | MB_TYPE_CBP | MB_TYPE_QUANT | MB_TYPE_16x16,
     0, //stuffing
     MB_TYPE_INTRA4x4                | MB_TYPE_CBP,
     MB_TYPE_INTRA4x4                | MB_TYPE_CBP | MB_TYPE_QUANT,
@@ -95,45 +99,45 @@ void ff_h263_show_pict_info(MpegEncContext *s){
 /***********************************************/
 /* decoding */
 
-VLC ff_h263_intra_MCBPC_vlc;
-VLC ff_h263_inter_MCBPC_vlc;
-VLC ff_h263_cbpy_vlc;
-static VLC mv_vlc;
-static VLC h263_mbtype_b_vlc;
-static VLC cbpc_b_vlc;
+VLCElem ff_h263_intra_MCBPC_vlc[72];
+VLCElem ff_h263_inter_MCBPC_vlc[198];
+VLCElem ff_h263_cbpy_vlc[64];
+VLCElem ff_h263_mv_vlc[538];
+static VLCElem h263_mbtype_b_vlc[80];
+static VLCElem cbpc_b_vlc[8];
 
 /* init vlcs */
 
-/* XXX: find a better solution to handle static init */
+static av_cold void h263_decode_init_vlc(void)
+{
+    VLC_INIT_STATIC_TABLE(ff_h263_intra_MCBPC_vlc, INTRA_MCBPC_VLC_BITS, 9,
+                          ff_h263_intra_MCBPC_bits, 1, 1,
+                          ff_h263_intra_MCBPC_code, 1, 1, 0);
+    VLC_INIT_STATIC_TABLE(ff_h263_inter_MCBPC_vlc, INTER_MCBPC_VLC_BITS, 28,
+                          ff_h263_inter_MCBPC_bits, 1, 1,
+                          ff_h263_inter_MCBPC_code, 1, 1, 0);
+    VLC_INIT_STATIC_TABLE(ff_h263_cbpy_vlc, CBPY_VLC_BITS, 16,
+                          &ff_h263_cbpy_tab[0][1], 2, 1,
+                          &ff_h263_cbpy_tab[0][0], 2, 1, 0);
+    VLC_INIT_STATIC_TABLE(ff_h263_mv_vlc, H263_MV_VLC_BITS, 33,
+                          &ff_mvtab[0][1], 2, 1,
+                          &ff_mvtab[0][0], 2, 1, 0);
+    ff_h263_init_rl_inter();
+    VLC_INIT_RL(ff_h263_rl_inter, 554);
+    INIT_FIRST_VLC_RL(ff_rl_intra_aic, 554);
+    VLC_INIT_STATIC_SPARSE_TABLE(h263_mbtype_b_vlc, H263_MBTYPE_B_VLC_BITS, 15,
+                                 &ff_h263_mbtype_b_tab[0][1], 2, 1,
+                                 &ff_h263_mbtype_b_tab[0][0], 2, 1,
+                                 h263_mb_type_b_map, 2, 2, 0);
+    VLC_INIT_STATIC_TABLE(cbpc_b_vlc, CBPC_B_VLC_BITS, 4,
+                          &ff_cbpc_b_tab[0][1], 2, 1,
+                          &ff_cbpc_b_tab[0][0], 2, 1, 0);
+}
+
 av_cold void ff_h263_decode_init_vlc(void)
 {
-    static volatile int done = 0;
-
-    if (!done) {
-        INIT_VLC_STATIC(&ff_h263_intra_MCBPC_vlc, INTRA_MCBPC_VLC_BITS, 9,
-                 ff_h263_intra_MCBPC_bits, 1, 1,
-                 ff_h263_intra_MCBPC_code, 1, 1, 72);
-        INIT_VLC_STATIC(&ff_h263_inter_MCBPC_vlc, INTER_MCBPC_VLC_BITS, 28,
-                 ff_h263_inter_MCBPC_bits, 1, 1,
-                 ff_h263_inter_MCBPC_code, 1, 1, 198);
-        INIT_VLC_STATIC(&ff_h263_cbpy_vlc, CBPY_VLC_BITS, 16,
-                 &ff_h263_cbpy_tab[0][1], 2, 1,
-                 &ff_h263_cbpy_tab[0][0], 2, 1, 64);
-        INIT_VLC_STATIC(&mv_vlc, MV_VLC_BITS, 33,
-                 &ff_mvtab[0][1], 2, 1,
-                 &ff_mvtab[0][0], 2, 1, 538);
-        ff_rl_init(&ff_h263_rl_inter, ff_h263_static_rl_table_store[0]);
-        ff_rl_init(&ff_rl_intra_aic, ff_h263_static_rl_table_store[1]);
-        INIT_VLC_RL(ff_h263_rl_inter, 554);
-        INIT_VLC_RL(ff_rl_intra_aic, 554);
-        INIT_VLC_STATIC(&h263_mbtype_b_vlc, H263_MBTYPE_B_VLC_BITS, 15,
-                 &ff_h263_mbtype_b_tab[0][1], 2, 1,
-                 &ff_h263_mbtype_b_tab[0][0], 2, 1, 80);
-        INIT_VLC_STATIC(&cbpc_b_vlc, CBPC_B_VLC_BITS, 4,
-                 &ff_cbpc_b_tab[0][1], 2, 1,
-                 &ff_cbpc_b_tab[0][0], 2, 1, 8);
-        done = 1;
-    }
+    static AVOnce init_static_once = AV_ONCE_INIT;
+    ff_thread_once(&init_static_once, h263_decode_init_vlc);
 }
 
 int ff_h263_decode_mba(MpegEncContext *s)
@@ -207,11 +211,26 @@ static int h263_decode_gob_header(MpegEncContext *s)
 }
 
 /**
- * Decode the group of blocks / video packet header.
+ * Decode the group of blocks / video packet header / slice header (MPEG-4 Studio).
  * @return bit position of the resync_marker, or <0 if none was found
  */
 int ff_h263_resync(MpegEncContext *s){
     int left, pos, ret;
+
+    /* In MPEG-4 studio mode look for a new slice startcode
+     * and decode slice header */
+    if(s->codec_id==AV_CODEC_ID_MPEG4 && s->studio_profile) {
+        align_get_bits(&s->gb);
+
+        while (get_bits_left(&s->gb) >= 32 && show_bits_long(&s->gb, 32) != SLICE_STARTCODE) {
+            get_bits(&s->gb, 8);
+        }
+
+        if (get_bits_left(&s->gb) >= 32 && show_bits_long(&s->gb, 32) == SLICE_STARTCODE)
+            return get_bits_count(&s->gb);
+        else
+            return -1;
+    }
 
     if(s->codec_id==AV_CODEC_ID_MPEG4){
         skip_bits1(&s->gb);
@@ -255,7 +274,7 @@ int ff_h263_resync(MpegEncContext *s){
 int ff_h263_decode_motion(MpegEncContext * s, int pred, int f_code)
 {
     int code, val, sign, shift;
-    code = get_vlc2(&s->gb, mv_vlc.table, MV_VLC_BITS, 2);
+    code = get_vlc2(&s->gb, ff_h263_mv_vlc, H263_MV_VLC_BITS, 2);
 
     if (code == 0)
         return pred;
@@ -339,22 +358,22 @@ static void preview_obmc(MpegEncContext *s){
     do{
         if (get_bits1(&s->gb)) {
             /* skip mb */
-            mot_val = s->current_picture.motion_val[0][s->block_index[0]];
+            mot_val = s->cur_pic.motion_val[0][s->block_index[0]];
             mot_val[0       ]= mot_val[2       ]=
             mot_val[0+stride]= mot_val[2+stride]= 0;
             mot_val[1       ]= mot_val[3       ]=
             mot_val[1+stride]= mot_val[3+stride]= 0;
 
-            s->current_picture.mb_type[xy] = MB_TYPE_SKIP | MB_TYPE_16x16 | MB_TYPE_L0;
+            s->cur_pic.mb_type[xy] = MB_TYPE_SKIP | MB_TYPE_16x16 | MB_TYPE_FORWARD_MV;
             goto end;
         }
-        cbpc = get_vlc2(&s->gb, ff_h263_inter_MCBPC_vlc.table, INTER_MCBPC_VLC_BITS, 2);
+        cbpc = get_vlc2(&s->gb, ff_h263_inter_MCBPC_vlc, INTER_MCBPC_VLC_BITS, 2);
     }while(cbpc == 20);
 
     if(cbpc & 4){
-        s->current_picture.mb_type[xy] = MB_TYPE_INTRA;
+        s->cur_pic.mb_type[xy] = MB_TYPE_INTRA;
     }else{
-        get_vlc2(&s->gb, ff_h263_cbpy_vlc.table, CBPY_VLC_BITS, 1);
+        get_vlc2(&s->gb, ff_h263_cbpy_vlc, CBPY_VLC_BITS, 1);
         if (cbpc & 8) {
             if(s->modified_quant){
                 if(get_bits1(&s->gb)) skip_bits(&s->gb, 1);
@@ -364,7 +383,7 @@ static void preview_obmc(MpegEncContext *s){
         }
 
         if ((cbpc & 16) == 0) {
-                s->current_picture.mb_type[xy] = MB_TYPE_16x16 | MB_TYPE_L0;
+                s->cur_pic.mb_type[xy] = MB_TYPE_16x16 | MB_TYPE_FORWARD_MV;
                 /* 16x16 motion prediction */
                 mot_val= ff_h263_pred_motion(s, 0, 0, &pred_x, &pred_y);
                 if (s->umvplus)
@@ -382,7 +401,7 @@ static void preview_obmc(MpegEncContext *s){
                 mot_val[1       ]= mot_val[3       ]=
                 mot_val[1+stride]= mot_val[3+stride]= my;
         } else {
-            s->current_picture.mb_type[xy] = MB_TYPE_8x8 | MB_TYPE_L0;
+            s->cur_pic.mb_type[xy] = MB_TYPE_8x8 | MB_TYPE_FORWARD_MV;
             for(i=0;i<4;i++) {
                 mot_val = ff_h263_pred_motion(s, i, 0, &pred_x, &pred_y);
                 if (s->umvplus)
@@ -425,11 +444,98 @@ static void h263_decode_dquant(MpegEncContext *s){
     ff_set_qscale(s, s->qscale);
 }
 
+static void h263_pred_acdc(MpegEncContext * s, int16_t *block, int n)
+{
+    int x, y, wrap, a, c, pred_dc, scale;
+    int16_t *dc_val, *ac_val, *ac_val1;
+
+    /* find prediction */
+    if (n < 4) {
+        x = 2 * s->mb_x + (n & 1);
+        y = 2 * s->mb_y + (n>> 1);
+        wrap = s->b8_stride;
+        dc_val = s->dc_val[0];
+        ac_val = s->ac_val[0][0];
+        scale = s->y_dc_scale;
+    } else {
+        x = s->mb_x;
+        y = s->mb_y;
+        wrap = s->mb_stride;
+        dc_val = s->dc_val[n - 4 + 1];
+        ac_val = s->ac_val[n - 4 + 1][0];
+        scale = s->c_dc_scale;
+    }
+
+    ac_val += ((y) * wrap + (x)) * 16;
+    ac_val1 = ac_val;
+
+    /* B C
+     * A X
+     */
+    a = dc_val[(x - 1) + (y) * wrap];
+    c = dc_val[(x) + (y - 1) * wrap];
+
+    /* No prediction outside GOB boundary */
+    if (s->first_slice_line && n != 3) {
+        if (n != 2) c= 1024;
+        if (n != 1 && s->mb_x == s->resync_mb_x) a= 1024;
+    }
+
+    if (s->ac_pred) {
+        pred_dc = 1024;
+        if (s->h263_aic_dir) {
+            /* left prediction */
+            if (a != 1024) {
+                ac_val -= 16;
+                for (int i = 1; i < 8; i++) {
+                    block[s->idsp.idct_permutation[i << 3]] += ac_val[i];
+                }
+                pred_dc = a;
+            }
+        } else {
+            /* top prediction */
+            if (c != 1024) {
+                ac_val -= 16 * wrap;
+                for (int i = 1; i < 8; i++) {
+                    block[s->idsp.idct_permutation[i]] += ac_val[i + 8];
+                }
+                pred_dc = c;
+            }
+        }
+    } else {
+        /* just DC prediction */
+        if (a != 1024 && c != 1024)
+            pred_dc = (a + c) >> 1;
+        else if (a != 1024)
+            pred_dc = a;
+        else
+            pred_dc = c;
+    }
+
+    /* we assume pred is positive */
+    block[0] = block[0] * scale + pred_dc;
+
+    if (block[0] < 0)
+        block[0] = 0;
+    else
+        block[0] |= 1;
+
+    /* Update AC/DC tables */
+    dc_val[(x) + (y) * wrap] = block[0];
+
+    /* left copy */
+    for (int i = 1; i < 8; i++)
+        ac_val1[i]     = block[s->idsp.idct_permutation[i << 3]];
+    /* top copy */
+    for (int i = 1; i < 8; i++)
+        ac_val1[8 + i] = block[s->idsp.idct_permutation[i]];
+}
+
 static int h263_decode_block(MpegEncContext * s, int16_t * block,
                              int n, int coded)
 {
     int level, i, j, run;
-    RLTable *rl = &ff_h263_rl_inter;
+    const RLTable *rl = &ff_h263_rl_inter;
     const uint8_t *scan_table;
     GetBitContext gb= s->gb;
 
@@ -439,9 +545,9 @@ static int h263_decode_block(MpegEncContext * s, int16_t * block,
         i = 0;
         if (s->ac_pred) {
             if (s->h263_aic_dir)
-                scan_table = s->intra_v_scantable.permutated; /* left */
+                scan_table = s->permutated_intra_v_scantable; /* left */
             else
-                scan_table = s->intra_h_scantable.permutated; /* top */
+                scan_table = s->permutated_intra_h_scantable; /* top */
         }
     } else if (s->mb_intra) {
         /* DC coef */
@@ -452,7 +558,7 @@ static int h263_decode_block(MpegEncContext * s, int16_t * block,
             level = s->last_dc[component];
             if (s->rv10_first_dc_coded[component]) {
                 diff = ff_rv_decode_dc(s, n);
-                if (diff == 0xffff)
+                if (diff < 0)
                     return -1;
                 level += diff;
                 level = level & 0xff; /* handle wrap round */
@@ -565,7 +671,7 @@ retry:
     }
 not_coded:
     if (s->mb_intra && s->h263_aic) {
-        ff_h263_pred_acdc(s, block, n);
+        h263_pred_acdc(s, block, n);
         i = 63;
     }
     s->block_last_index[n] = i;
@@ -574,7 +680,7 @@ not_coded:
 
 static int h263_skip_b_part(MpegEncContext *s, int cbp)
 {
-    LOCAL_ALIGNED_16(int16_t, dblock, [64]);
+    LOCAL_ALIGNED_32(int16_t, dblock, [64]);
     int i, mbi;
     int bli[6];
 
@@ -614,7 +720,7 @@ static int h263_get_modb(GetBitContext *gb, int pb_frame, int *cbpb)
 
 #define tab_size ((signed)FF_ARRAY_ELEMS(s->direct_scale_mv[0]))
 #define tab_bias (tab_size / 2)
-static inline void set_one_direct_mv(MpegEncContext *s, Picture *p, int i)
+static inline void set_one_direct_mv(MpegEncContext *s, const MPVPicture *p, int i)
 {
     int xy           = s->block_index[i];
     uint16_t time_pp = s->pp_time;
@@ -645,12 +751,12 @@ static inline void set_one_direct_mv(MpegEncContext *s, Picture *p, int i)
 static int set_direct_mv(MpegEncContext *s)
 {
     const int mb_index = s->mb_x + s->mb_y * s->mb_stride;
-    Picture *p = &s->next_picture;
+    const MPVPicture *p = s->next_pic.ptr;
     int colocated_mb_type = p->mb_type[mb_index];
     int i;
 
     if (s->codec_tag == AV_RL32("U263") && p->f->pict_type == AV_PICTURE_TYPE_I) {
-        p = &s->last_picture;
+        p = s->last_pic.ptr;
         colocated_mb_type = p->mb_type[mb_index];
     }
 
@@ -658,7 +764,7 @@ static int set_direct_mv(MpegEncContext *s)
         s->mv_type = MV_TYPE_8X8;
         for (i = 0; i < 4; i++)
             set_one_direct_mv(s, p, i);
-        return MB_TYPE_DIRECT2 | MB_TYPE_8x8 | MB_TYPE_L0L1;
+        return MB_TYPE_DIRECT2 | MB_TYPE_8x8 | MB_TYPE_BIDIR_MV;
     } else {
         set_one_direct_mv(s, p, 0);
         s->mv[0][1][0] =
@@ -675,7 +781,7 @@ static int set_direct_mv(MpegEncContext *s)
         s->mv[1][3][1] = s->mv[1][0][1];
         s->mv_type = MV_TYPE_8X8;
         // Note see prev line
-        return MB_TYPE_DIRECT2 | MB_TYPE_16x16 | MB_TYPE_L0L1;
+        return MB_TYPE_DIRECT2 | MB_TYPE_16x16 | MB_TYPE_BIDIR_MV;
     }
 }
 
@@ -698,13 +804,13 @@ int ff_h263_decode_mb(MpegEncContext *s,
                     s->block_last_index[i] = -1;
                 s->mv_dir = MV_DIR_FORWARD;
                 s->mv_type = MV_TYPE_16X16;
-                s->current_picture.mb_type[xy] = MB_TYPE_SKIP | MB_TYPE_16x16 | MB_TYPE_L0;
+                s->cur_pic.mb_type[xy] = MB_TYPE_SKIP | MB_TYPE_16x16 | MB_TYPE_FORWARD_MV;
                 s->mv[0][0][0] = 0;
                 s->mv[0][0][1] = 0;
                 s->mb_skipped = !(s->obmc | s->loop_filter);
                 goto end;
             }
-            cbpc = get_vlc2(&s->gb, ff_h263_inter_MCBPC_vlc.table, INTER_MCBPC_VLC_BITS, 2);
+            cbpc = get_vlc2(&s->gb, ff_h263_inter_MCBPC_vlc, INTER_MCBPC_VLC_BITS, 2);
             if (cbpc < 0){
                 av_log(s->avctx, AV_LOG_ERROR, "cbpc damaged at %d %d\n", s->mb_x, s->mb_y);
                 return SLICE_ERROR;
@@ -719,7 +825,7 @@ int ff_h263_decode_mb(MpegEncContext *s,
 
         if(s->pb_frame && get_bits1(&s->gb))
             pb_mv_count = h263_get_modb(&s->gb, s->pb_frame, &cbpb);
-        cbpy = get_vlc2(&s->gb, ff_h263_cbpy_vlc.table, CBPY_VLC_BITS, 1);
+        cbpy = get_vlc2(&s->gb, ff_h263_cbpy_vlc, CBPY_VLC_BITS, 1);
 
         if (cbpy < 0) {
             av_log(s->avctx, AV_LOG_ERROR, "cbpy damaged at %d %d\n", s->mb_x, s->mb_y);
@@ -736,7 +842,7 @@ int ff_h263_decode_mb(MpegEncContext *s,
 
         s->mv_dir = MV_DIR_FORWARD;
         if ((cbpc & 16) == 0) {
-            s->current_picture.mb_type[xy] = MB_TYPE_16x16 | MB_TYPE_L0;
+            s->cur_pic.mb_type[xy] = MB_TYPE_16x16 | MB_TYPE_FORWARD_MV;
             /* 16x16 motion prediction */
             s->mv_type = MV_TYPE_16X16;
             ff_h263_pred_motion(s, 0, 0, &pred_x, &pred_y);
@@ -761,7 +867,7 @@ int ff_h263_decode_mb(MpegEncContext *s,
             if (s->umvplus && (mx - pred_x) == 1 && (my - pred_y) == 1)
                skip_bits1(&s->gb); /* Bit stuffing to prevent PSC */
         } else {
-            s->current_picture.mb_type[xy] = MB_TYPE_8x8 | MB_TYPE_L0;
+            s->cur_pic.mb_type[xy] = MB_TYPE_8x8 | MB_TYPE_FORWARD_MV;
             s->mv_type = MV_TYPE_8X8;
             for(i=0;i<4;i++) {
                 mot_val = ff_h263_pred_motion(s, i, 0, &pred_x, &pred_y);
@@ -789,8 +895,8 @@ int ff_h263_decode_mb(MpegEncContext *s,
     } else if(s->pict_type==AV_PICTURE_TYPE_B) {
         int mb_type;
         const int stride= s->b8_stride;
-        int16_t *mot_val0 = s->current_picture.motion_val[0][2 * (s->mb_x + s->mb_y * stride)];
-        int16_t *mot_val1 = s->current_picture.motion_val[1][2 * (s->mb_x + s->mb_y * stride)];
+        int16_t *mot_val0 = s->cur_pic.motion_val[0][2 * (s->mb_x + s->mb_y * stride)];
+        int16_t *mot_val1 = s->cur_pic.motion_val[1][2 * (s->mb_x + s->mb_y * stride)];
 //        const int mv_xy= s->mb_x + 1 + s->mb_y * s->mb_stride;
 
         //FIXME ugly
@@ -800,25 +906,24 @@ int ff_h263_decode_mb(MpegEncContext *s,
         mot_val1[1       ]= mot_val1[3       ]= mot_val1[1+2*stride]= mot_val1[3+2*stride]= 0;
 
         do{
-            mb_type= get_vlc2(&s->gb, h263_mbtype_b_vlc.table, H263_MBTYPE_B_VLC_BITS, 2);
+            mb_type = get_vlc2(&s->gb, h263_mbtype_b_vlc,
+                               H263_MBTYPE_B_VLC_BITS, 2);
             if (mb_type < 0){
                 av_log(s->avctx, AV_LOG_ERROR, "b mb_type damaged at %d %d\n", s->mb_x, s->mb_y);
                 return SLICE_ERROR;
             }
-
-            mb_type= h263_mb_type_b_map[ mb_type ];
         }while(!mb_type);
 
         s->mb_intra = IS_INTRA(mb_type);
         if(HAS_CBP(mb_type)){
             s->bdsp.clear_blocks(s->block[0]);
-            cbpc = get_vlc2(&s->gb, cbpc_b_vlc.table, CBPC_B_VLC_BITS, 1);
+            cbpc = get_vlc2(&s->gb, cbpc_b_vlc, CBPC_B_VLC_BITS, 1);
             if(s->mb_intra){
                 dquant = IS_QUANT(mb_type);
                 goto intra;
             }
 
-            cbpy = get_vlc2(&s->gb, ff_h263_cbpy_vlc.table, CBPY_VLC_BITS, 1);
+            cbpy = get_vlc2(&s->gb, ff_h263_cbpy_vlc, CBPY_VLC_BITS, 1);
 
             if (cbpy < 0){
                 av_log(s->avctx, AV_LOG_ERROR, "b cbpy damaged at %d %d\n", s->mb_x, s->mb_y);
@@ -846,7 +951,7 @@ int ff_h263_decode_mb(MpegEncContext *s,
             s->mv_type= MV_TYPE_16X16;
 //FIXME UMV
 
-            if(USES_LIST(mb_type, 0)){
+            if (HAS_FORWARD_MV(mb_type)) {
                 int16_t *mot_val= ff_h263_pred_motion(s, 0, 0, &pred_x, &pred_y);
                 s->mv_dir = MV_DIR_FORWARD;
 
@@ -873,7 +978,7 @@ int ff_h263_decode_mb(MpegEncContext *s,
                 mot_val[1       ]= mot_val[3       ]= mot_val[1+2*stride]= mot_val[3+2*stride]= my;
             }
 
-            if(USES_LIST(mb_type, 1)){
+            if (HAS_BACKWARD_MV(mb_type)) {
                 int16_t *mot_val= ff_h263_pred_motion(s, 0, 1, &pred_x, &pred_y);
                 s->mv_dir |= MV_DIR_BACKWARD;
 
@@ -901,10 +1006,10 @@ int ff_h263_decode_mb(MpegEncContext *s,
             }
         }
 
-        s->current_picture.mb_type[xy] = mb_type;
+        s->cur_pic.mb_type[xy] = mb_type;
     } else { /* I-Frame */
         do{
-            cbpc = get_vlc2(&s->gb, ff_h263_intra_MCBPC_vlc.table, INTRA_MCBPC_VLC_BITS, 2);
+            cbpc = get_vlc2(&s->gb, ff_h263_intra_MCBPC_vlc, INTRA_MCBPC_VLC_BITS, 2);
             if (cbpc < 0){
                 av_log(s->avctx, AV_LOG_ERROR, "I cbpc damaged at %d %d\n", s->mb_x, s->mb_y);
                 return SLICE_ERROR;
@@ -916,11 +1021,11 @@ int ff_h263_decode_mb(MpegEncContext *s,
         dquant = cbpc & 4;
         s->mb_intra = 1;
 intra:
-        s->current_picture.mb_type[xy] = MB_TYPE_INTRA;
+        s->cur_pic.mb_type[xy] = MB_TYPE_INTRA;
         if (s->h263_aic) {
             s->ac_pred = get_bits1(&s->gb);
             if(s->ac_pred){
-                s->current_picture.mb_type[xy] = MB_TYPE_INTRA | MB_TYPE_ACPRED;
+                s->cur_pic.mb_type[xy] = MB_TYPE_INTRA | MB_TYPE_ACPRED;
 
                 s->h263_aic_dir = get_bits1(&s->gb);
             }
@@ -929,7 +1034,7 @@ intra:
 
         if(s->pb_frame && get_bits1(&s->gb))
             pb_mv_count = h263_get_modb(&s->gb, s->pb_frame, &cbpb);
-        cbpy = get_vlc2(&s->gb, ff_h263_cbpy_vlc.table, CBPY_VLC_BITS, 1);
+        cbpy = get_vlc2(&s->gb, ff_h263_cbpy_vlc, CBPY_VLC_BITS, 1);
         if(cbpy<0){
             av_log(s->avctx, AV_LOG_ERROR, "I cbpy damaged at %d %d\n", s->mb_x, s->mb_y);
             return SLICE_ERROR;
@@ -988,7 +1093,7 @@ int ff_h263_decode_picture_header(MpegEncContext *s)
 
     align_get_bits(&s->gb);
 
-    if (show_bits(&s->gb, 2) == 2 && s->avctx->frame_number == 0) {
+    if (show_bits(&s->gb, 2) == 2 && s->avctx->frame_num == 0) {
          av_log(s->avctx, AV_LOG_WARNING, "Header looks like RTP instead of H.263\n");
     }
 
@@ -1049,7 +1154,6 @@ int ff_h263_decode_picture_header(MpegEncContext *s)
             return -1; /* SAC: off */
         }
         s->obmc= get_bits1(&s->gb); /* Advanced prediction mode */
-        s->unrestricted_mv = s->h263_long_vectors || s->obmc;
 
         s->pb_frame = get_bits1(&s->gb);
         s->chroma_qscale= s->qscale = get_bits(&s->gb, 5);
@@ -1079,7 +1183,6 @@ int ff_h263_decode_picture_header(MpegEncContext *s)
             s->obmc= get_bits1(&s->gb); /* Advanced prediction mode */
             s->h263_aic = get_bits1(&s->gb); /* Advanced Intra Coding (AIC) */
             s->loop_filter= get_bits1(&s->gb);
-            s->unrestricted_mv = s->umvplus || s->obmc || s->loop_filter;
             if(s->avctx->lowres)
                 s->loop_filter = 0;
 
@@ -1122,8 +1225,8 @@ int ff_h263_decode_picture_header(MpegEncContext *s)
         if (ufep) {
             if (format == 6) {
                 /* Custom Picture Format (CPFMT) */
-                s->aspect_ratio_info = get_bits(&s->gb, 4);
-                ff_dlog(s->avctx, "aspect: %d\n", s->aspect_ratio_info);
+                int aspect_ratio_info = get_bits(&s->gb, 4);
+                ff_dlog(s->avctx, "aspect: %d\n", aspect_ratio_info);
                 /* aspect ratios:
                 0 - forbidden
                 1 - 1:1
@@ -1137,12 +1240,12 @@ int ff_h263_decode_picture_header(MpegEncContext *s)
                 check_marker(s->avctx, &s->gb, "in dimensions");
                 height = get_bits(&s->gb, 9) * 4;
                 ff_dlog(s->avctx, "\nH.263+ Custom picture: %dx%d\n",width,height);
-                if (s->aspect_ratio_info == FF_ASPECT_EXTENDED) {
+                if (aspect_ratio_info == FF_ASPECT_EXTENDED) {
                     /* expected dimensions */
                     s->avctx->sample_aspect_ratio.num= get_bits(&s->gb, 8);
                     s->avctx->sample_aspect_ratio.den= get_bits(&s->gb, 8);
                 }else{
-                    s->avctx->sample_aspect_ratio= ff_h263_pixel_aspect[s->aspect_ratio_info];
+                    s->avctx->sample_aspect_ratio= ff_h263_pixel_aspect[aspect_ratio_info];
                 }
             } else {
                 width = ff_h263_format[format][0];
@@ -1202,6 +1305,11 @@ int ff_h263_decode_picture_header(MpegEncContext *s)
 
     if ((ret = av_image_check_size(s->width, s->height, 0, s)) < 0)
         return ret;
+
+    if (!(s->avctx->flags2 & AV_CODEC_FLAG2_CHUNKS)) {
+        if ((s->width * s->height / 256 / 8) > get_bits_left(&s->gb))
+            return AVERROR_INVALIDDATA;
+    }
 
     s->mb_width = (s->width  + 15) / 16;
     s->mb_height = (s->height  + 15) / 16;
@@ -1266,7 +1374,7 @@ int ff_h263_decode_picture_header(MpegEncContext *s)
         for(i=0; i<13; i++){
             for(j=0; j<3; j++){
                 int v= get_bits(&s->gb, 8);
-                v |= get_sbits(&s->gb, 8)<<8;
+                v |= get_sbits(&s->gb, 8) * (1 << 8);
                 av_log(s->avctx, AV_LOG_DEBUG, " %5d", v);
             }
             av_log(s->avctx, AV_LOG_DEBUG, "\n");

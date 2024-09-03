@@ -25,9 +25,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "avcodec.h"
-
-#define PRORES_BITS_PER_SAMPLE 10 ///< output precision of prores decoder
 
 typedef struct ProresDSPContext {
     int idct_permutation_type;
@@ -35,8 +32,8 @@ typedef struct ProresDSPContext {
     void (*idct_put)(uint16_t *out, ptrdiff_t linesize, int16_t *block, const int16_t *qmat);
 } ProresDSPContext;
 
-void ff_proresdsp_init(ProresDSPContext *dsp, AVCodecContext *avctx);
+int ff_proresdsp_init(ProresDSPContext *dsp, int bits_per_raw_sample);
 
-void ff_proresdsp_init_x86(ProresDSPContext *dsp, AVCodecContext *avctx);
+void ff_proresdsp_init_x86(ProresDSPContext *dsp, int bits_per_raw_sample);
 
 #endif /* AVCODEC_PRORESDSP_H */

@@ -24,8 +24,8 @@
 #include "libavutil/pixdesc.h"
 
 #include "avfilter.h"
+#include "filters.h"
 #include "formats.h"
-#include "internal.h"
 #include "video.h"
 
 typedef struct HWDownloadContext {
@@ -37,26 +37,12 @@ typedef struct HWDownloadContext {
 
 static int hwdownload_query_formats(AVFilterContext *avctx)
 {
-    AVFilterFormats  *infmts = NULL;
-    AVFilterFormats *outfmts = NULL;
-    const AVPixFmtDescriptor *desc;
     int err;
 
-    for (desc = av_pix_fmt_desc_next(NULL); desc;
-         desc = av_pix_fmt_desc_next(desc)) {
-        if (desc->flags & AV_PIX_FMT_FLAG_HWACCEL)
-            err = ff_add_format(&infmts,  av_pix_fmt_desc_get_id(desc));
-        else
-            err = ff_add_format(&outfmts, av_pix_fmt_desc_get_id(desc));
-        if (err) {
-            ff_formats_unref(&infmts);
-            ff_formats_unref(&outfmts);
-            return err;
-        }
-    }
-
-    if ((err = ff_formats_ref(infmts,  &avctx->inputs[0]->out_formats)) < 0 ||
-        (err = ff_formats_ref(outfmts, &avctx->outputs[0]->in_formats)) < 0)
+    if ((err = ff_formats_ref(ff_formats_pixdesc_filter(AV_PIX_FMT_FLAG_HWACCEL, 0),
+                              &avctx->inputs[0]->outcfg.formats))  ||
+        (err = ff_formats_ref(ff_formats_pixdesc_filter(0, AV_PIX_FMT_FLAG_HWACCEL),
+                              &avctx->outputs[0]->incfg.formats)))
         return err;
 
     return 0;
@@ -64,18 +50,19 @@ static int hwdownload_query_formats(AVFilterContext *avctx)
 
 static int hwdownload_config_input(AVFilterLink *inlink)
 {
+    FilterLink          *l = ff_filter_link(inlink);
     AVFilterContext *avctx = inlink->dst;
     HWDownloadContext *ctx = avctx->priv;
 
     av_buffer_unref(&ctx->hwframes_ref);
 
-    if (!inlink->hw_frames_ctx) {
+    if (!l->hw_frames_ctx) {
         av_log(ctx, AV_LOG_ERROR, "The input must have a hardware frame "
                "reference.\n");
         return AVERROR(EINVAL);
     }
 
-    ctx->hwframes_ref = av_buffer_ref(inlink->hw_frames_ctx);
+    ctx->hwframes_ref = av_buffer_ref(l->hw_frames_ctx);
     if (!ctx->hwframes_ref)
         return AVERROR(ENOMEM);
 
@@ -193,7 +180,6 @@ static const AVFilterPad hwdownload_inputs[] = {
         .config_props = hwdownload_config_input,
         .filter_frame = hwdownload_filter_frame,
     },
-    { NULL }
 };
 
 static const AVFilterPad hwdownload_outputs[] = {
@@ -202,17 +188,16 @@ static const AVFilterPad hwdownload_outputs[] = {
         .type         = AVMEDIA_TYPE_VIDEO,
         .config_props = hwdownload_config_output,
     },
-    { NULL }
 };
 
-AVFilter ff_vf_hwdownload = {
+const AVFilter ff_vf_hwdownload = {
     .name          = "hwdownload",
     .description   = NULL_IF_CONFIG_SMALL("Download a hardware frame to a normal frame"),
     .uninit        = hwdownload_uninit,
-    .query_formats = hwdownload_query_formats,
     .priv_size     = sizeof(HWDownloadContext),
     .priv_class    = &hwdownload_class,
-    .inputs        = hwdownload_inputs,
-    .outputs       = hwdownload_outputs,
+    FILTER_INPUTS(hwdownload_inputs),
+    FILTER_OUTPUTS(hwdownload_outputs),
+    FILTER_QUERY_FUNC(hwdownload_query_formats),
     .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
 };

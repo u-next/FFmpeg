@@ -24,8 +24,15 @@
 #include "avcodec.h"
 #include "pixblockdsp.h"
 
-static void get_pixels_16_c(int16_t *av_restrict block, const uint8_t *pixels,
+static void get_pixels_16_c(int16_t *restrict block, const uint8_t *pixels,
                             ptrdiff_t stride)
+{
+    for (int i = 0; i < 8; i++)
+        AV_COPY128(block + i * 8, pixels + i * stride);
+}
+
+static void get_pixels_unaligned_16_c(int16_t *restrict block,
+                                      const uint8_t *pixels, ptrdiff_t stride)
 {
     AV_COPY128U(block + 0 * 8, pixels + 0 * stride);
     AV_COPY128U(block + 1 * 8, pixels + 1 * stride);
@@ -37,7 +44,7 @@ static void get_pixels_16_c(int16_t *av_restrict block, const uint8_t *pixels,
     AV_COPY128U(block + 7 * 8, pixels + 7 * stride);
 }
 
-static void get_pixels_8_c(int16_t *av_restrict block, const uint8_t *pixels,
+static void get_pixels_8_c(int16_t *restrict block, const uint8_t *pixels,
                            ptrdiff_t stride)
 {
     int i;
@@ -57,7 +64,7 @@ static void get_pixels_8_c(int16_t *av_restrict block, const uint8_t *pixels,
     }
 }
 
-static void diff_pixels_c(int16_t *av_restrict block, const uint8_t *s1,
+static void diff_pixels_c(int16_t *restrict block, const uint8_t *s1,
                           const uint8_t *s2, ptrdiff_t stride)
 {
     int i;
@@ -80,7 +87,7 @@ static void diff_pixels_c(int16_t *av_restrict block, const uint8_t *s1,
 
 av_cold void ff_pixblockdsp_init(PixblockDSPContext *c, AVCodecContext *avctx)
 {
-    const unsigned high_bit_depth = avctx->bits_per_raw_sample > 8;
+    av_unused const unsigned high_bit_depth = avctx->bits_per_raw_sample > 8;
 
     c->diff_pixels_unaligned =
     c->diff_pixels = diff_pixels_c;
@@ -90,23 +97,28 @@ av_cold void ff_pixblockdsp_init(PixblockDSPContext *c, AVCodecContext *avctx)
     case 10:
     case 12:
     case 14:
+        c->get_pixels_unaligned = get_pixels_unaligned_16_c;
         c->get_pixels = get_pixels_16_c;
         break;
     default:
         if (avctx->bits_per_raw_sample<=8 || avctx->codec_type != AVMEDIA_TYPE_VIDEO) {
+            c->get_pixels_unaligned =
             c->get_pixels = get_pixels_8_c;
         }
         break;
     }
 
-    if (ARCH_ALPHA)
-        ff_pixblockdsp_init_alpha(c, avctx, high_bit_depth);
-    if (ARCH_ARM)
-        ff_pixblockdsp_init_arm(c, avctx, high_bit_depth);
-    if (ARCH_PPC)
-        ff_pixblockdsp_init_ppc(c, avctx, high_bit_depth);
-    if (ARCH_X86)
-        ff_pixblockdsp_init_x86(c, avctx, high_bit_depth);
-    if (ARCH_MIPS)
-        ff_pixblockdsp_init_mips(c, avctx, high_bit_depth);
+#if ARCH_AARCH64
+    ff_pixblockdsp_init_aarch64(c, avctx, high_bit_depth);
+#elif ARCH_ARM
+    ff_pixblockdsp_init_arm(c, avctx, high_bit_depth);
+#elif ARCH_PPC
+    ff_pixblockdsp_init_ppc(c, avctx, high_bit_depth);
+#elif ARCH_RISCV
+    ff_pixblockdsp_init_riscv(c, avctx, high_bit_depth);
+#elif ARCH_X86
+    ff_pixblockdsp_init_x86(c, avctx, high_bit_depth);
+#elif ARCH_MIPS
+    ff_pixblockdsp_init_mips(c, avctx, high_bit_depth);
+#endif
 }

@@ -29,96 +29,9 @@
 #undef PREFETCH
 
 
-#if COMPILE_TEMPLATE_MMXEXT
 #define REAL_MOVNTQ(a,b) "movntq " #a ", " #b " \n\t"
 #define MOVNTQ2 "movntq "
-#else
-#define REAL_MOVNTQ(a,b) "movq " #a ", " #b " \n\t"
-#define MOVNTQ2 "movq "
-#endif
 #define MOVNTQ(a,b)  REAL_MOVNTQ(a,b)
-
-#if !COMPILE_TEMPLATE_MMXEXT
-static av_always_inline void
-dither_8to16(const uint8_t *srcDither, int rot)
-{
-    if (rot) {
-        __asm__ volatile("pxor      %%mm0, %%mm0\n\t"
-                         "movq       (%0), %%mm3\n\t"
-                         "movq      %%mm3, %%mm4\n\t"
-                         "psrlq       $24, %%mm3\n\t"
-                         "psllq       $40, %%mm4\n\t"
-                         "por       %%mm4, %%mm3\n\t"
-                         "movq      %%mm3, %%mm4\n\t"
-                         "punpcklbw %%mm0, %%mm3\n\t"
-                         "punpckhbw %%mm0, %%mm4\n\t"
-                         :: "r"(srcDither)
-                         );
-    } else {
-        __asm__ volatile("pxor      %%mm0, %%mm0\n\t"
-                         "movq       (%0), %%mm3\n\t"
-                         "movq      %%mm3, %%mm4\n\t"
-                         "punpcklbw %%mm0, %%mm3\n\t"
-                         "punpckhbw %%mm0, %%mm4\n\t"
-                         :: "r"(srcDither)
-                         );
-    }
-}
-#endif
-
-static void RENAME(yuv2yuvX)(const int16_t *filter, int filterSize,
-                           const int16_t **src, uint8_t *dest, int dstW,
-                           const uint8_t *dither, int offset)
-{
-    dither_8to16(dither, offset);
-    filterSize--;
-    __asm__ volatile(
-        "movd %0, %%mm1\n\t"
-        "punpcklwd %%mm1, %%mm1\n\t"
-        "punpckldq %%mm1, %%mm1\n\t"
-        "psllw        $3, %%mm1\n\t"
-        "paddw     %%mm1, %%mm3\n\t"
-        "paddw     %%mm1, %%mm4\n\t"
-        "psraw        $4, %%mm3\n\t"
-        "psraw        $4, %%mm4\n\t"
-        ::"m"(filterSize)
-     );
-
-    __asm__ volatile(\
-        "movq    %%mm3, %%mm6\n\t"
-        "movq    %%mm4, %%mm7\n\t"
-        "movl %3, %%ecx\n\t"
-        "mov                                 %0, %%"FF_REG_d"       \n\t"\
-        "mov                        (%%"FF_REG_d"), %%"FF_REG_S"    \n\t"\
-        ".p2align                             4                     \n\t" /* FIXME Unroll? */\
-        "1:                                                         \n\t"\
-        "movq                      8(%%"FF_REG_d"), %%mm0           \n\t" /* filterCoeff */\
-        "movq                (%%"FF_REG_S", %%"FF_REG_c", 2), %%mm2 \n\t" /* srcData */\
-        "movq               8(%%"FF_REG_S", %%"FF_REG_c", 2), %%mm5 \n\t" /* srcData */\
-        "add                                $16, %%"FF_REG_d"       \n\t"\
-        "mov                        (%%"FF_REG_d"), %%"FF_REG_S"    \n\t"\
-        "test                         %%"FF_REG_S", %%"FF_REG_S"    \n\t"\
-        "pmulhw                           %%mm0, %%mm2      \n\t"\
-        "pmulhw                           %%mm0, %%mm5      \n\t"\
-        "paddw                            %%mm2, %%mm3      \n\t"\
-        "paddw                            %%mm5, %%mm4      \n\t"\
-        " jnz                                1b             \n\t"\
-        "psraw                               $3, %%mm3      \n\t"\
-        "psraw                               $3, %%mm4      \n\t"\
-        "packuswb                         %%mm4, %%mm3      \n\t"
-        MOVNTQ2 "                         %%mm3, (%1, %%"FF_REG_c")\n\t"
-        "add                          $8, %%"FF_REG_c"      \n\t"\
-        "cmp                          %2, %%"FF_REG_c"      \n\t"\
-        "movq    %%mm6, %%mm3\n\t"
-        "movq    %%mm7, %%mm4\n\t"
-        "mov                                 %0, %%"FF_REG_d"     \n\t"\
-        "mov                        (%%"FF_REG_d"), %%"FF_REG_S"  \n\t"\
-        "jb                                  1b                   \n\t"\
-        :: "g" (filter),
-           "r" (dest-offset), "g" ((x86_reg)(dstW+offset)), "m" (offset)
-        : "%"FF_REG_d, "%"FF_REG_S, "%"FF_REG_c
-    );
-}
 
 #define YSCALEYUV2PACKEDX_UV \
     __asm__ volatile(\
@@ -471,11 +384,9 @@ static void RENAME(yuv2rgb565_X_ar)(SwsContext *c, const int16_t *lumFilter,
     YSCALEYUV2RGBX
     "pxor %%mm7, %%mm7 \n\t"
     /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
     "paddusb "BLUE_DITHER"(%0), %%mm2\n\t"
     "paddusb "GREEN_DITHER"(%0), %%mm4\n\t"
     "paddusb "RED_DITHER"(%0), %%mm5\n\t"
-#endif
     WRITERGB16(%4, "%5", %%FF_REGa)
     YSCALEYUV2PACKEDX_END
 }
@@ -495,11 +406,9 @@ static void RENAME(yuv2rgb565_X)(SwsContext *c, const int16_t *lumFilter,
     YSCALEYUV2RGBX
     "pxor %%mm7, %%mm7 \n\t"
     /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
     "paddusb "BLUE_DITHER"(%0), %%mm2  \n\t"
     "paddusb "GREEN_DITHER"(%0), %%mm4  \n\t"
     "paddusb "RED_DITHER"(%0), %%mm5  \n\t"
-#endif
     WRITERGB16(%4, "%5", %%FF_REGa)
     YSCALEYUV2PACKEDX_END
 }
@@ -548,11 +457,9 @@ static void RENAME(yuv2rgb555_X_ar)(SwsContext *c, const int16_t *lumFilter,
     YSCALEYUV2RGBX
     "pxor %%mm7, %%mm7 \n\t"
     /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
     "paddusb "BLUE_DITHER"(%0), %%mm2\n\t"
     "paddusb "GREEN_DITHER"(%0), %%mm4\n\t"
     "paddusb "RED_DITHER"(%0), %%mm5\n\t"
-#endif
     WRITERGB15(%4, "%5", %%FF_REGa)
     YSCALEYUV2PACKEDX_END
 }
@@ -572,11 +479,9 @@ static void RENAME(yuv2rgb555_X)(SwsContext *c, const int16_t *lumFilter,
     YSCALEYUV2RGBX
     "pxor %%mm7, %%mm7 \n\t"
     /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
     "paddusb "BLUE_DITHER"(%0), %%mm2  \n\t"
     "paddusb "GREEN_DITHER"(%0), %%mm4  \n\t"
     "paddusb "RED_DITHER"(%0), %%mm5  \n\t"
-#endif
     WRITERGB15(%4, "%5", %%FF_REGa)
     YSCALEYUV2PACKEDX_END
 }
@@ -682,13 +587,8 @@ static void RENAME(yuv2rgb555_X)(SwsContext *c, const int16_t *lumFilter,
     "cmp   "dstw", "#index"     \n\t"\
     " jb       1b               \n\t"
 
-#if COMPILE_TEMPLATE_MMXEXT
 #undef WRITEBGR24
 #define WRITEBGR24(dst, dstw, index)  WRITEBGR24MMXEXT(dst, dstw, index)
-#else
-#undef WRITEBGR24
-#define WRITEBGR24(dst, dstw, index)  WRITEBGR24MMX(dst, dstw, index)
-#endif
 
 #if HAVE_6REGS
 static void RENAME(yuv2bgr24_X_ar)(SwsContext *c, const int16_t *lumFilter,
@@ -983,11 +883,9 @@ static void RENAME(yuv2rgb555_2)(SwsContext *c, const int16_t *buf[2],
         YSCALEYUV2RGB(%%FF_REGBP, %5)
         "pxor    %%mm7, %%mm7                   \n\t"
         /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
         "paddusb "BLUE_DITHER"(%5), %%mm2       \n\t"
         "paddusb "GREEN_DITHER"(%5), %%mm4      \n\t"
         "paddusb "RED_DITHER"(%5), %%mm5        \n\t"
-#endif
         WRITERGB15(%%FF_REGb, DSTW_OFFSET"(%5)", %%FF_REGBP)
         "pop %%"FF_REG_BP"                      \n\t"
         "mov "ESP_OFFSET"(%5), %%"FF_REG_b"     \n\t"
@@ -1012,11 +910,9 @@ static void RENAME(yuv2rgb565_2)(SwsContext *c, const int16_t *buf[2],
         YSCALEYUV2RGB(%%FF_REGBP, %5)
         "pxor    %%mm7, %%mm7                   \n\t"
         /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
         "paddusb "BLUE_DITHER"(%5), %%mm2       \n\t"
         "paddusb "GREEN_DITHER"(%5), %%mm4      \n\t"
         "paddusb "RED_DITHER"(%5), %%mm5        \n\t"
-#endif
         WRITERGB16(%%FF_REGb, DSTW_OFFSET"(%5)", %%FF_REGBP)
         "pop %%"FF_REG_BP"                      \n\t"
         "mov "ESP_OFFSET"(%5), %%"FF_REG_b"     \n\t"
@@ -1332,11 +1228,9 @@ static void RENAME(yuv2rgb555_1)(SwsContext *c, const int16_t *buf0,
             YSCALEYUV2RGB1(%%FF_REGBP, %5)
             "pxor    %%mm7, %%mm7                   \n\t"
             /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
             "paddusb "BLUE_DITHER"(%5), %%mm2       \n\t"
             "paddusb "GREEN_DITHER"(%5), %%mm4      \n\t"
             "paddusb "RED_DITHER"(%5), %%mm5        \n\t"
-#endif
             WRITERGB15(%%FF_REGb, DSTW_OFFSET"(%5)", %%FF_REGBP)
             "pop %%"FF_REG_BP"                      \n\t"
             "mov "ESP_OFFSET"(%5), %%"FF_REG_b"     \n\t"
@@ -1353,11 +1247,9 @@ static void RENAME(yuv2rgb555_1)(SwsContext *c, const int16_t *buf0,
             YSCALEYUV2RGB1b(%%FF_REGBP, %5)
             "pxor    %%mm7, %%mm7                   \n\t"
             /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
             "paddusb "BLUE_DITHER"(%5), %%mm2       \n\t"
             "paddusb "GREEN_DITHER"(%5), %%mm4      \n\t"
             "paddusb "RED_DITHER"(%5), %%mm5        \n\t"
-#endif
             WRITERGB15(%%FF_REGb, DSTW_OFFSET"(%5)", %%FF_REGBP)
             "pop %%"FF_REG_BP"                      \n\t"
             "mov "ESP_OFFSET"(%5), %%"FF_REG_b"     \n\t"
@@ -1385,11 +1277,9 @@ static void RENAME(yuv2rgb565_1)(SwsContext *c, const int16_t *buf0,
             YSCALEYUV2RGB1(%%FF_REGBP, %5)
             "pxor    %%mm7, %%mm7                   \n\t"
             /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
             "paddusb "BLUE_DITHER"(%5), %%mm2       \n\t"
             "paddusb "GREEN_DITHER"(%5), %%mm4      \n\t"
             "paddusb "RED_DITHER"(%5), %%mm5        \n\t"
-#endif
             WRITERGB16(%%FF_REGb, DSTW_OFFSET"(%5)", %%FF_REGBP)
             "pop %%"FF_REG_BP"                      \n\t"
             "mov "ESP_OFFSET"(%5), %%"FF_REG_b"     \n\t"
@@ -1406,11 +1296,9 @@ static void RENAME(yuv2rgb565_1)(SwsContext *c, const int16_t *buf0,
             YSCALEYUV2RGB1b(%%FF_REGBP, %5)
             "pxor    %%mm7, %%mm7                   \n\t"
             /* mm2=B, %%mm4=G, %%mm5=R, %%mm7=0 */
-#ifdef DITHER1XBPP
             "paddusb "BLUE_DITHER"(%5), %%mm2       \n\t"
             "paddusb "GREEN_DITHER"(%5), %%mm4      \n\t"
             "paddusb "RED_DITHER"(%5), %%mm5        \n\t"
-#endif
             WRITERGB16(%%FF_REGb, DSTW_OFFSET"(%5)", %%FF_REGBP)
             "pop %%"FF_REG_BP"                      \n\t"
             "mov "ESP_OFFSET"(%5), %%"FF_REG_b"     \n\t"
@@ -1499,8 +1387,9 @@ static av_cold void RENAME(sws_init_swscale)(SwsContext *c)
     enum AVPixelFormat dstFormat = c->dstFormat;
 
     c->use_mmx_vfilter= 0;
-    if (!is16BPS(dstFormat) && !isNBPS(dstFormat) && dstFormat != AV_PIX_FMT_NV12
-        && dstFormat != AV_PIX_FMT_NV21 && !(c->flags & SWS_BITEXACT)) {
+    if (!is16BPS(dstFormat) && !isNBPS(dstFormat) && !isSemiPlanarYUV(dstFormat)
+        && dstFormat != AV_PIX_FMT_GRAYF32BE && dstFormat != AV_PIX_FMT_GRAYF32LE
+        && !(c->flags & SWS_BITEXACT)) {
             if (c->flags & SWS_ACCURATE_RND) {
                 if (!(c->flags & SWS_FULL_CHR_H_INT)) {
                     switch (c->dstFormat) {
@@ -1516,7 +1405,6 @@ static av_cold void RENAME(sws_init_swscale)(SwsContext *c)
                 }
             } else {
                 c->use_mmx_vfilter= 1;
-                c->yuv2planeX = RENAME(yuv2yuvX    );
                 if (!(c->flags & SWS_FULL_CHR_H_INT)) {
                     switch (c->dstFormat) {
                     case AV_PIX_FMT_RGB32:   c->yuv2packedX = RENAME(yuv2rgb32_X);   break;
@@ -1560,17 +1448,13 @@ static av_cold void RENAME(sws_init_swscale)(SwsContext *c)
     }
 
     if (c->srcBpc == 8 && c->dstBpc <= 14) {
-    // Use the new MMX scaler if the MMXEXT one can't be used (it is faster than the x86 ASM one).
-#if COMPILE_TEMPLATE_MMXEXT
-    if (c->flags & SWS_FAST_BILINEAR && c->canMMXEXTBeUsed) {
-        c->hyscale_fast = ff_hyscale_fast_mmxext;
-        c->hcscale_fast = ff_hcscale_fast_mmxext;
-    } else {
-#endif /* COMPILE_TEMPLATE_MMXEXT */
-        c->hyscale_fast = NULL;
-        c->hcscale_fast = NULL;
-#if COMPILE_TEMPLATE_MMXEXT
-    }
-#endif /* COMPILE_TEMPLATE_MMXEXT */
+        // Use the new MMX scaler if the MMXEXT one can't be used (it is faster than the x86 ASM one).
+        if (c->flags & SWS_FAST_BILINEAR && c->canMMXEXTBeUsed) {
+            c->hyscale_fast = ff_hyscale_fast_mmxext;
+            c->hcscale_fast = ff_hcscale_fast_mmxext;
+        } else {
+            c->hyscale_fast = NULL;
+            c->hcscale_fast = NULL;
+        }
     }
 }

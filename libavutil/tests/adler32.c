@@ -17,20 +17,21 @@
  */
 
 // LCOV_EXCL_START
+
+#include "libavutil/timer.h"
+
 #include <string.h>
 
 #include "libavutil/log.h"
-#include "libavutil/timer.h"
 #include "libavutil/adler32.h"
 
 #define LEN 7001
-
-static volatile int checksum;
 
 int main(int argc, char **argv)
 {
     int i;
     uint8_t data[LEN];
+    AVAdler checksum;
 
     av_log_set_level(AV_LOG_DEBUG);
 

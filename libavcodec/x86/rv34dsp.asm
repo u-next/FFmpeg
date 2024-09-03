@@ -44,61 +44,17 @@ SECTION .text
     sar    %1, 10
 %endmacro
 
-%macro rv34_idct 1
-cglobal rv34_idct_%1, 1, 2, 0
+INIT_MMX mmxext
+cglobal rv34_idct_dc_noround, 1, 2, 0
     movsx   r1, word [r0]
-    IDCT_DC r1
+    IDCT_DC_NOROUND r1
     movd    m0, r1d
     pshufw  m0, m0, 0
     movq    [r0+ 0], m0
     movq    [r0+ 8], m0
     movq    [r0+16], m0
     movq    [r0+24], m0
-    REP_RET
-%endmacro
-
-INIT_MMX mmxext
-%define IDCT_DC IDCT_DC_ROUND
-rv34_idct dc
-%define IDCT_DC IDCT_DC_NOROUND
-rv34_idct dc_noround
-
-; ff_rv34_idct_dc_add_mmx(uint8_t *dst, int stride, int dc);
-%if ARCH_X86_32
-INIT_MMX mmx
-cglobal rv34_idct_dc_add, 3, 3
-    ; calculate DC
-    IDCT_DC_ROUND r2
-    pxor       m1, m1
-    movd       m0, r2d
-    psubw      m1, m0
-    packuswb   m0, m0
-    packuswb   m1, m1
-    punpcklbw  m0, m0
-    punpcklbw  m1, m1
-    punpcklwd  m0, m0
-    punpcklwd  m1, m1
-
-    ; add DC
-    lea        r2, [r0+r1*2]
-    movh       m2, [r0]
-    movh       m3, [r0+r1]
-    movh       m4, [r2]
-    movh       m5, [r2+r1]
-    paddusb    m2, m0
-    paddusb    m3, m0
-    paddusb    m4, m0
-    paddusb    m5, m0
-    psubusb    m2, m1
-    psubusb    m3, m1
-    psubusb    m4, m1
-    psubusb    m5, m1
-    movh       [r0], m2
-    movh       [r0+r1], m3
-    movh       [r2], m4
-    movh       [r2+r1], m5
     RET
-%endif
 
 ; Load coeffs and perform row transform
 ; Output: coeffs in mm[0467], rounder in mm5
@@ -157,15 +113,15 @@ cglobal rv34_idct_dc_add, 3, 3
     movd         %1, %2
 %endmacro
 INIT_MMX mmxext
-cglobal rv34_idct_add, 3,3,0, d, s, b
-    ROW_TRANSFORM       bq
-    COL_TRANSFORM     [dq], mm0, [pw_col_coeffs+ 0], [pw_col_coeffs+ 8]
-    mova               mm0, [pw_col_coeffs+ 0]
-    COL_TRANSFORM  [dq+sq], mm4, mm0, [pw_col_coeffs+ 8]
-    mova               mm4, [pw_col_coeffs+ 8]
-    lea                 dq, [dq + 2*sq]
-    COL_TRANSFORM     [dq], mm6, mm0, mm4
-    COL_TRANSFORM  [dq+sq], mm7, mm0, mm4
+cglobal rv34_idct_add, 3, 3, 0, dst, s, b
+    ROW_TRANSFORM        bq
+    COL_TRANSFORM    [dstq], mm0, [pw_col_coeffs+ 0], [pw_col_coeffs+ 8]
+    mova                mm0, [pw_col_coeffs+ 0]
+    COL_TRANSFORM [dstq+sq], mm4, mm0, [pw_col_coeffs+ 8]
+    mova                mm4, [pw_col_coeffs+ 8]
+    lea                dstq, [dstq + 2*sq]
+    COL_TRANSFORM    [dstq], mm6, mm0, mm4
+    COL_TRANSFORM [dstq+sq], mm7, mm0, mm4
     ret
 
 ; ff_rv34_idct_dc_add_sse4(uint8_t *dst, int stride, int dc);

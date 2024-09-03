@@ -19,8 +19,10 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavutil/mem.h"
 #include "bytestream.h"
-#include "internal.h"
+#include "codec_internal.h"
+#include "decode.h"
 
 enum PsdCompr {
     PSD_RAW,
@@ -211,11 +213,9 @@ static int decode_header(PSDContext * s)
     case 2:
         avpriv_request_sample(s->avctx, "ZIP without predictor compression");
         return AVERROR_PATCHWELCOME;
-        break;
     case 3:
         avpriv_request_sample(s->avctx, "ZIP with predictor compression");
         return AVERROR_PATCHWELCOME;
-        break;
     default:
         av_log(s->avctx, AV_LOG_ERROR, "Unknown compression %d.\n", s->compression);
         return AVERROR_INVALIDDATA;
@@ -290,7 +290,7 @@ static int decode_rle(PSDContext * s){
     return 0;
 }
 
-static int decode_frame(AVCodecContext *avctx, void *data,
+static int decode_frame(AVCodecContext *avctx, AVFrame *picture,
                         int *got_frame, AVPacket *avpkt)
 {
     int ret;
@@ -299,8 +299,6 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     int index_out, c, y, x, p;
     uint8_t eq_channel[4] = {2,0,1,3};/* RGBA -> GBRA channel order */
     uint8_t plane_number;
-
-    AVFrame *picture = data;
 
     PSDContext *s = avctx->priv_data;
     s->avctx     = avctx;
@@ -337,6 +335,30 @@ static int decode_frame(AVCodecContext *avctx, void *data,
         }
         avctx->pix_fmt = AV_PIX_FMT_PAL8;
         break;
+    case PSD_CMYK:
+        if (s->channel_count == 4) {
+            if (s->channel_depth == 8) {
+                avctx->pix_fmt = AV_PIX_FMT_GBRP;
+            } else if (s->channel_depth == 16) {
+                avctx->pix_fmt = AV_PIX_FMT_GBRP16BE;
+            } else {
+                avpriv_report_missing_feature(avctx, "channel depth %d for cmyk", s->channel_depth);
+                return AVERROR_PATCHWELCOME;
+            }
+        } else if (s->channel_count == 5) {
+            if (s->channel_depth == 8) {
+                avctx->pix_fmt = AV_PIX_FMT_GBRAP;
+            } else if (s->channel_depth == 16) {
+                avctx->pix_fmt = AV_PIX_FMT_GBRAP16BE;
+            } else {
+                avpriv_report_missing_feature(avctx, "channel depth %d for cmyk", s->channel_depth);
+                return AVERROR_PATCHWELCOME;
+            }
+        } else {
+            avpriv_report_missing_feature(avctx, "channel count %d for cmyk", s->channel_count);
+            return AVERROR_PATCHWELCOME;
+        }
+        break;
     case PSD_RGB:
         if (s->channel_count == 3) {
             if (s->channel_depth == 8) {
@@ -369,6 +391,8 @@ static int decode_frame(AVCodecContext *avctx, void *data,
                 avctx->pix_fmt = AV_PIX_FMT_GRAY8;
             } else if (s->channel_depth == 16) {
                 avctx->pix_fmt = AV_PIX_FMT_GRAY16BE;
+            } else if (s->channel_depth == 32) {
+                avctx->pix_fmt = AV_PIX_FMT_GRAYF32BE;
             } else {
                 avpriv_report_missing_feature(avctx, "channel depth %d for grayscale", s->channel_depth);
                 return AVERROR_PATCHWELCOME;
@@ -433,6 +457,66 @@ static int decode_frame(AVCodecContext *avctx, void *data,
                 }
             }
         }
+    } else if (s->color_mode == PSD_CMYK) {
+        uint8_t *dst[4] = { picture->data[0], picture->data[1], picture->data[2], picture->data[3] };
+        const uint8_t *src[5] = { ptr_data };
+        src[1] = src[0] + s->line_size * s->height;
+        src[2] = src[1] + s->line_size * s->height;
+        src[3] = src[2] + s->line_size * s->height;
+        src[4] = src[3] + s->line_size * s->height;
+        if (s->channel_depth == 8) {
+            for (y = 0; y < s->height; y++) {
+                for (x = 0; x < s->width; x++) {
+                    int k = src[3][x];
+                    int r = src[0][x] * k;
+                    int g = src[1][x] * k;
+                    int b = src[2][x] * k;
+                    dst[0][x] = g * 257 >> 16;
+                    dst[1][x] = b * 257 >> 16;
+                    dst[2][x] = r * 257 >> 16;
+                }
+                dst[0] += picture->linesize[0];
+                dst[1] += picture->linesize[1];
+                dst[2] += picture->linesize[2];
+                src[0] += s->line_size;
+                src[1] += s->line_size;
+                src[2] += s->line_size;
+                src[3] += s->line_size;
+            }
+            if (avctx->pix_fmt == AV_PIX_FMT_GBRAP) {
+                for (y = 0; y < s->height; y++) {
+                    memcpy(dst[3], src[4], s->line_size);
+                    src[4] += s->line_size;
+                    dst[3] += picture->linesize[3];
+                }
+            }
+        } else {
+            for (y = 0; y < s->height; y++) {
+                for (x = 0; x < s->width; x++) {
+                    int64_t k = AV_RB16(&src[3][x * 2]);
+                    int64_t r = AV_RB16(&src[0][x * 2]) * k;
+                    int64_t g = AV_RB16(&src[1][x * 2]) * k;
+                    int64_t b = AV_RB16(&src[2][x * 2]) * k;
+                    AV_WB16(&dst[0][x * 2], g * 65537 >> 32);
+                    AV_WB16(&dst[1][x * 2], b * 65537 >> 32);
+                    AV_WB16(&dst[2][x * 2], r * 65537 >> 32);
+                }
+                dst[0] += picture->linesize[0];
+                dst[1] += picture->linesize[1];
+                dst[2] += picture->linesize[2];
+                src[0] += s->line_size;
+                src[1] += s->line_size;
+                src[2] += s->line_size;
+                src[3] += s->line_size;
+            }
+            if (avctx->pix_fmt == AV_PIX_FMT_GBRAP16BE) {
+                for (y = 0; y < s->height; y++) {
+                    memcpy(dst[3], src[4], s->line_size);
+                    src[4] += s->line_size;
+                    dst[3] += picture->linesize[3];
+                }
+            }
+        }
     } else {/* Planar */
         if (s->channel_count == 1)/* gray 8 or gray 16be */
             eq_channel[0] = 0;/* assign first channel, to first plane */
@@ -449,7 +533,11 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     }
 
     if (s->color_mode == PSD_INDEXED) {
+#if FF_API_PALETTE_HAS_CHANGED
+FF_DISABLE_DEPRECATION_WARNINGS
         picture->palette_has_changed = 1;
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
         memcpy(picture->data[1], s->palette, AVPALETTE_SIZE);
     }
 
@@ -461,12 +549,12 @@ static int decode_frame(AVCodecContext *avctx, void *data,
     return avpkt->size;
 }
 
-AVCodec ff_psd_decoder = {
-    .name             = "psd",
-    .long_name        = NULL_IF_CONFIG_SMALL("Photoshop PSD file"),
-    .type             = AVMEDIA_TYPE_VIDEO,
-    .id               = AV_CODEC_ID_PSD,
+const FFCodec ff_psd_decoder = {
+    .p.name           = "psd",
+    CODEC_LONG_NAME("Photoshop PSD file"),
+    .p.type           = AVMEDIA_TYPE_VIDEO,
+    .p.id             = AV_CODEC_ID_PSD,
+    .p.capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
     .priv_data_size   = sizeof(PSDContext),
-    .decode           = decode_frame,
-    .capabilities     = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS,
+    FF_CODEC_DECODE_CB(decode_frame),
 };

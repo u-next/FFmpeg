@@ -24,9 +24,12 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "libavformat/demux.h"
 #include "libavformat/internal.h"
+#include "libavutil/file_open.h"
 #include "libavutil/internal.h"
 #include "libavutil/log.h"
+#include "libavutil/mem.h"
 #include "libavutil/opt.h"
 #include "libavutil/parseutils.h"
 #include "libavutil/time.h"
@@ -225,14 +228,14 @@ static void bktr_getframe(uint64_t per_frame)
 {
     uint64_t curtime;
 
-    curtime = av_gettime();
+    curtime = av_gettime_relative();
     if (!last_frame_time
         || ((last_frame_time + per_frame) > curtime)) {
         if (!usleep(last_frame_time + per_frame + per_frame / 8 - curtime)) {
             if (!nsignals)
                 av_log(NULL, AV_LOG_INFO,
                        "SLEPT NO signals - %d microseconds late\n",
-                       (int)(av_gettime() - last_frame_time - per_frame));
+                       (int)(av_gettime_relative() - last_frame_time - per_frame));
         }
     }
     nsignals = 0;
@@ -262,6 +265,9 @@ static int grab_read_header(AVFormatContext *s1)
     AVStream *st;
     AVRational framerate;
     int ret = 0;
+
+    av_log(s1, AV_LOG_WARNING, "bktr input is deprecated and will be removed. "
+           "Please contact the developers if you are interested in maintaining it.\n");
 
     if (!s->framerate)
         switch (s->standard) {
@@ -294,7 +300,7 @@ static int grab_read_header(AVFormatContext *s1)
     st->codecpar->height = s->height;
     st->avg_frame_rate = framerate;
 
-    if (bktr_init(s1->filename, s->width, s->height, s->standard,
+    if (bktr_init(s1->url, s->width, s->height, s->standard,
                   &s->video_fd, &s->tuner_fd, -1, 0.0) < 0) {
         ret = AVERROR(EIO);
         goto out;
@@ -328,33 +334,33 @@ static int grab_read_close(AVFormatContext *s1)
 #define OFFSET(x) offsetof(VideoData, x)
 #define DEC AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
-    { "standard", "", offsetof(VideoData, standard), AV_OPT_TYPE_INT, {.i64 = VIDEO_FORMAT}, PAL, NTSCJ, AV_OPT_FLAG_DECODING_PARAM, "standard" },
-    { "PAL",      "", 0, AV_OPT_TYPE_CONST, {.i64 = PAL},   0, 0, AV_OPT_FLAG_DECODING_PARAM, "standard" },
-    { "NTSC",     "", 0, AV_OPT_TYPE_CONST, {.i64 = NTSC},  0, 0, AV_OPT_FLAG_DECODING_PARAM, "standard" },
-    { "SECAM",    "", 0, AV_OPT_TYPE_CONST, {.i64 = SECAM}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "standard" },
-    { "PALN",     "", 0, AV_OPT_TYPE_CONST, {.i64 = PALN},  0, 0, AV_OPT_FLAG_DECODING_PARAM, "standard" },
-    { "PALM",     "", 0, AV_OPT_TYPE_CONST, {.i64 = PALM},  0, 0, AV_OPT_FLAG_DECODING_PARAM, "standard" },
-    { "NTSCJ",    "", 0, AV_OPT_TYPE_CONST, {.i64 = NTSCJ}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, "standard" },
+    { "standard", "", offsetof(VideoData, standard), AV_OPT_TYPE_INT, {.i64 = VIDEO_FORMAT}, PAL, NTSCJ, AV_OPT_FLAG_DECODING_PARAM, .unit = "standard" },
+    { "PAL",      "", 0, AV_OPT_TYPE_CONST, {.i64 = PAL},   0, 0, AV_OPT_FLAG_DECODING_PARAM, .unit = "standard" },
+    { "NTSC",     "", 0, AV_OPT_TYPE_CONST, {.i64 = NTSC},  0, 0, AV_OPT_FLAG_DECODING_PARAM, .unit = "standard" },
+    { "SECAM",    "", 0, AV_OPT_TYPE_CONST, {.i64 = SECAM}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, .unit = "standard" },
+    { "PALN",     "", 0, AV_OPT_TYPE_CONST, {.i64 = PALN},  0, 0, AV_OPT_FLAG_DECODING_PARAM, .unit = "standard" },
+    { "PALM",     "", 0, AV_OPT_TYPE_CONST, {.i64 = PALM},  0, 0, AV_OPT_FLAG_DECODING_PARAM, .unit = "standard" },
+    { "NTSCJ",    "", 0, AV_OPT_TYPE_CONST, {.i64 = NTSCJ}, 0, 0, AV_OPT_FLAG_DECODING_PARAM, .unit = "standard" },
     { "video_size", "A string describing frame size, such as 640x480 or hd720.", OFFSET(width), AV_OPT_TYPE_IMAGE_SIZE, {.str = "vga"}, 0, 0, DEC },
     { "framerate", "", OFFSET(framerate), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },
     { NULL },
 };
 
 static const AVClass bktr_class = {
-    .class_name = "BKTR grab interface",
+    .class_name = "BKTR grab indev",
     .item_name  = av_default_item_name,
     .option     = options,
     .version    = LIBAVUTIL_VERSION_INT,
     .category   = AV_CLASS_CATEGORY_DEVICE_VIDEO_INPUT,
 };
 
-AVInputFormat ff_bktr_demuxer = {
-    .name           = "bktr",
-    .long_name      = NULL_IF_CONFIG_SMALL("video grab"),
+const FFInputFormat ff_bktr_demuxer = {
+    .p.name         = "bktr",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("video grab"),
+    .p.flags        = AVFMT_NOFILE,
+    .p.priv_class   = &bktr_class,
     .priv_data_size = sizeof(VideoData),
     .read_header    = grab_read_header,
     .read_packet    = grab_read_packet,
     .read_close     = grab_read_close,
-    .flags          = AVFMT_NOFILE,
-    .priv_class     = &bktr_class,
 };

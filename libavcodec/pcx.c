@@ -22,21 +22,25 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavutil/imgutils.h"
+#include "libavutil/mem.h"
 #include "avcodec.h"
 #include "bytestream.h"
+#include "codec_internal.h"
+#include "decode.h"
 #include "get_bits.h"
-#include "internal.h"
 
 #define PCX_HEADER_SIZE 128
 
-static void pcx_rle_decode(GetByteContext *gb,
+static int pcx_rle_decode(GetByteContext *gb,
                            uint8_t *dst,
                            unsigned int bytes_per_scanline,
                            int compressed)
 {
     unsigned int i = 0;
     unsigned char run, value;
+
+    if (bytestream2_get_bytes_left(gb) < 1)
+        return AVERROR_INVALIDDATA;
 
     if (compressed) {
         while (i < bytes_per_scanline && bytestream2_get_bytes_left(gb)>0) {
@@ -52,6 +56,7 @@ static void pcx_rle_decode(GetByteContext *gb,
     } else {
         bytestream2_get_buffer(gb, dst, bytes_per_scanline);
     }
+    return 0;
 }
 
 static void pcx_palette(GetByteContext *gb, uint32_t *dst, int pallen)
@@ -65,16 +70,16 @@ static void pcx_palette(GetByteContext *gb, uint32_t *dst, int pallen)
         memset(dst, 0, (256 - pallen) * sizeof(*dst));
 }
 
-static int pcx_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
-                            AVPacket *avpkt)
+static int pcx_decode_frame(AVCodecContext *avctx, AVFrame *p,
+                            int *got_frame, AVPacket *avpkt)
 {
     GetByteContext gb;
-    AVFrame * const p  = data;
     int compressed, xmin, ymin, xmax, ymax;
     int ret;
-    unsigned int w, h, bits_per_pixel, bytes_per_line, nplanes, stride, y, x,
+    unsigned int w, h, bits_per_pixel, bytes_per_line, nplanes, y, x,
                  bytes_per_scanline;
     uint8_t *ptr, *scanline;
+    ptrdiff_t stride;
 
     if (avpkt->size < PCX_HEADER_SIZE) {
         av_log(avctx, AV_LOG_ERROR, "Packet too small\n");
@@ -153,7 +158,9 @@ static int pcx_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
 
     if (nplanes == 3 && bits_per_pixel == 8) {
         for (y = 0; y < h; y++) {
-            pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            ret = pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            if (ret < 0)
+                goto end;
 
             for (x = 0; x < w; x++) {
                 ptr[3 * x]     = scanline[x];
@@ -174,7 +181,9 @@ static int pcx_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         }
 
         for (y = 0; y < h; y++, ptr += stride) {
-            pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            ret = pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            if (ret < 0)
+                goto end;
             memcpy(ptr, scanline, w);
         }
 
@@ -194,7 +203,9 @@ static int pcx_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         for (y = 0; y < h; y++) {
             init_get_bits8(&s, scanline, bytes_per_scanline);
 
-            pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            ret = pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            if (ret < 0)
+                goto end;
 
             for (x = 0; x < w; x++)
                 ptr[x] = get_bits(&s, bits_per_pixel);
@@ -204,7 +215,9 @@ static int pcx_decode_frame(AVCodecContext *avctx, void *data, int *got_frame,
         int i;
 
         for (y = 0; y < h; y++) {
-            pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            ret = pcx_rle_decode(&gb, scanline, bytes_per_scanline, compressed);
+            if (ret < 0)
+                goto end;
 
             for (x = 0; x < w; x++) {
                 int m = 0x80 >> (x & 7), v = 0;
@@ -237,11 +250,11 @@ end:
     return ret;
 }
 
-AVCodec ff_pcx_decoder = {
-    .name         = "pcx",
-    .long_name    = NULL_IF_CONFIG_SMALL("PC Paintbrush PCX image"),
-    .type         = AVMEDIA_TYPE_VIDEO,
-    .id           = AV_CODEC_ID_PCX,
-    .decode       = pcx_decode_frame,
-    .capabilities = AV_CODEC_CAP_DR1,
+const FFCodec ff_pcx_decoder = {
+    .p.name       = "pcx",
+    CODEC_LONG_NAME("PC Paintbrush PCX image"),
+    .p.type       = AVMEDIA_TYPE_VIDEO,
+    .p.id         = AV_CODEC_ID_PCX,
+    FF_CODEC_DECODE_CB(pcx_decode_frame),
+    .p.capabilities = AV_CODEC_CAP_DR1,
 };

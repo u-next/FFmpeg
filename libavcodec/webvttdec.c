@@ -27,6 +27,7 @@
 
 #include "avcodec.h"
 #include "ass.h"
+#include "codec_internal.h"
 #include "libavutil/bprint.h"
 
 static const struct {
@@ -36,9 +37,9 @@ static const struct {
     {"<i>", "{\\i1}"}, {"</i>", "{\\i0}"},
     {"<b>", "{\\b1}"}, {"</b>", "{\\b0}"},
     {"<u>", "{\\u1}"}, {"</u>", "{\\u0}"},
-    {"{", "\\{"}, {"}", "\\}"}, // escape to avoid ASS markup conflicts
+    {"{", "\\{{}"}, {"\\", "\\\xe2\x81\xa0"}, // escape to avoid ASS markup conflicts
     {"&gt;", ">"}, {"&lt;", "<"},
-    {"&lrm;", ""}, {"&rlm;", ""}, // FIXME: properly honor bidi marks
+    {"&lrm;", "\xe2\x80\x8e"}, {"&rlm;", "\xe2\x80\x8f"},
     {"&amp;", "&"}, {"&nbsp;", "\\h"},
 };
 
@@ -79,11 +80,10 @@ static int webvtt_event_to_ass(AVBPrint *buf, const char *p)
     return 0;
 }
 
-static int webvtt_decode_frame(AVCodecContext *avctx,
-                               void *data, int *got_sub_ptr, AVPacket *avpkt)
+static int webvtt_decode_frame(AVCodecContext *avctx, AVSubtitle *sub,
+                               int *got_sub_ptr, const AVPacket *avpkt)
 {
     int ret = 0;
-    AVSubtitle *sub = data;
     const char *ptr = avpkt->data;
     FFASSDecoderContext *s = avctx->priv_data;
     AVBPrint buf;
@@ -98,12 +98,12 @@ static int webvtt_decode_frame(AVCodecContext *avctx,
     return avpkt->size;
 }
 
-AVCodec ff_webvtt_decoder = {
-    .name           = "webvtt",
-    .long_name      = NULL_IF_CONFIG_SMALL("WebVTT subtitle"),
-    .type           = AVMEDIA_TYPE_SUBTITLE,
-    .id             = AV_CODEC_ID_WEBVTT,
-    .decode         = webvtt_decode_frame,
+const FFCodec ff_webvtt_decoder = {
+    .p.name         = "webvtt",
+    CODEC_LONG_NAME("WebVTT subtitle"),
+    .p.type         = AVMEDIA_TYPE_SUBTITLE,
+    .p.id           = AV_CODEC_ID_WEBVTT,
+    FF_CODEC_DECODE_SUB_CB(webvtt_decode_frame),
     .init           = ff_ass_subtitle_header_default,
     .flush          = ff_ass_decoder_flush,
     .priv_data_size = sizeof(FFASSDecoderContext),

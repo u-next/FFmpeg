@@ -60,8 +60,6 @@
 #include "sbr.h"
 #include "aacsbr.h"
 #include "aacsbrdata.h"
-#include "aacsbr_fixed_tablegen.h"
-#include "fft.h"
 #include "aacps.h"
 #include "sbrdsp.h"
 #include "libavutil/internal.h"
@@ -72,7 +70,6 @@
 #include <float.h>
 #include <math.h>
 
-static VLC vlc_sbr[10];
 static void aacsbr_func_ptr_init(AACSBRContext *c);
 static const int CONST_LN2       = Q31(0.6931471806/256);  // ln(2)/256
 static const int CONST_RECIP_LN2 = Q31(0.7213475204);      // 0.5/ln(2)
@@ -397,7 +394,7 @@ static void sbr_chirp(SpectralBandReplication *sbr, SBRData *ch_data)
  * Calculation of levels of additional HF signal components (14496-3 sp04 p219)
  * and Calculation of gain (14496-3 sp04 p219)
  */
-static void sbr_gain_calc(AACContext *ac, SpectralBandReplication *sbr,
+static void sbr_gain_calc(SpectralBandReplication *sbr,
                           SBRData *ch_data, const int e_a[2])
 {
     int e, k, m;
@@ -433,6 +430,7 @@ static void sbr_gain_calc(AACContext *ac, SpectralBandReplication *sbr,
                                                 av_add_sf(FLOAT_1, sbr->e_curr[e][m]),
                                                 av_add_sf(FLOAT_1, sbr->q_mapped[e][m]))));
                 }
+                sbr->gain[e][m] = av_add_sf(sbr->gain[e][m], FLOAT_MIN);
             }
             for (m = sbr->f_tablelim[k] - sbr->kx[1]; m < sbr->f_tablelim[k + 1] - sbr->kx[1]; m++) {
                 sum[0] = av_add_sf(sum[0], sbr->e_origmapped[e][m]);
@@ -566,8 +564,9 @@ static void sbr_hf_assemble(int Y1[38][64][2],
                 int idx = indexsine&1;
                 int A = (1-((indexsine+(kx & 1))&2));
                 int B = (A^(-idx)) + idx;
-                int *out = &Y1[i][kx][idx];
-                int shift, round;
+                unsigned *out = &Y1[i][kx][idx];
+                int shift;
+                unsigned round;
 
                 SoftFloat *in  = sbr->s_m[e];
                 for (m = 0; m+1 < m_max; m+=2) {
@@ -580,12 +579,12 @@ static void sbr_hf_assemble(int Y1[38][64][2],
                     }
                     if (shift < 32) {
                         round = 1 << (shift-1);
-                        out[2*m  ] += (in[m  ].mant * A + round) >> shift;
+                        out[2*m  ] += (int)(in[m  ].mant * A + round) >> shift;
                     }
 
                     if (shift2 < 32) {
                         round = 1 << (shift2-1);
-                        out[2*m+2] += (in[m+1].mant * B + round) >> shift2;
+                        out[2*m+2] += (int)(in[m+1].mant * B + round) >> shift2;
                     }
                 }
                 if(m_max&1)
@@ -596,7 +595,7 @@ static void sbr_hf_assemble(int Y1[38][64][2],
                         return;
                     } else if (shift < 32) {
                         round = 1 << (shift-1);
-                        out[2*m  ] += (in[m  ].mant * A + round) >> shift;
+                        out[2*m  ] += (int)(in[m  ].mant * A + round) >> shift;
                     }
                 }
             }

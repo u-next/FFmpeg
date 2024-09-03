@@ -25,6 +25,7 @@
 #include "libavutil/avstring.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mathematics.h"
+#include "libavutil/mem.h"
 
 static int usage(const char *argv0, int ret)
 {
@@ -191,7 +192,7 @@ static int handle_file(struct Tracks *tracks, const char *file)
                                                 track->timescale, AV_ROUND_UP));
 
         if (track->is_audio) {
-            track->channels    = st->codecpar->channels;
+            track->channels    = st->codecpar->ch_layout.nb_channels;
             track->sample_rate = st->codecpar->sample_rate;
         }
         if (track->is_video) {
@@ -362,8 +363,6 @@ int main(int argc, char **argv)
     const char *out = NULL;
     struct Tracks tracks = { 0 };
     int i;
-
-    av_register_all();
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-out")) {

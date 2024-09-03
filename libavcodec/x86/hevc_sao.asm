@@ -119,7 +119,7 @@ DEFINE_ARGS dst, src, dststride, srcstride, offset, height
 %endif ; ARCH
 %endmacro
 
-;void ff_hevc_sao_band_filter_<width>_8_<opt>(uint8_t *_dst, uint8_t *_src, ptrdiff_t _stride_dst, ptrdiff_t _stride_src,
+;void ff_hevc_sao_band_filter_<width>_8_<opt>(uint8_t *_dst, const uint8_t *_src, ptrdiff_t _stride_dst, ptrdiff_t _stride_src,
 ;                                             int16_t *sao_offset_val, int sao_left_class, int width, int height);
 %macro HEVC_SAO_BAND_FILTER 2
 cglobal hevc_sao_band_filter_%1_8, 6, 6, 15, 7*mmsize*ARCH_X86_32, dst, src, dststride, srcstride, offset, left
@@ -166,7 +166,7 @@ INIT_YMM cpuname
     add             srcq, srcstrideq             ; src += srcstride
     dec          heightd                         ; cmp height
     jnz               .loop                      ; height loop
-    REP_RET
+    RET
 %endmacro
 
 
@@ -198,7 +198,7 @@ HEVC_SAO_BAND_FILTER 64, 2
 ;******************************************************************************
 
 %define MAX_PB_SIZE  64
-%define PADDING_SIZE 32 ; AV_INPUT_BUFFER_PADDING_SIZE
+%define PADDING_SIZE 64 ; AV_INPUT_BUFFER_PADDING_SIZE
 %define EDGE_SRCSTRIDE 2 * MAX_PB_SIZE + PADDING_SIZE
 
 %macro HEVC_SAO_EDGE_FILTER_INIT 0

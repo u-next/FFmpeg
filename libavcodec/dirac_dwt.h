@@ -61,11 +61,14 @@ typedef struct DWTContext {
     int support;
 
     void (*spatial_compose)(struct DWTContext *cs, int level, int width, int height, int stride);
-    void (*vertical_compose_l0)(void);
-    void (*vertical_compose_h0)(void);
-    void (*vertical_compose_l1)(void);
-    void (*vertical_compose_h1)(void);
-    void (*vertical_compose)(void);     ///< one set of lowpass and highpass combined
+    union {
+        vertical_compose_3tap tap3;
+        vertical_compose_5tap tap5;
+        vertical_compose_9tap tap9;
+    } vertical_compose_l0, vertical_compose_h0;
+    vertical_compose_3tap vertical_compose_l1;
+    vertical_compose_3tap vertical_compose_h1;
+    vertical_compose_2tap vertical_compose;     ///< one set of lowpass and highpass combined
     void (*horizontal_compose)(uint8_t *b, uint8_t *tmp, int width);
 
     DWTCompose cs[MAX_DECOMPOSITIONS];
@@ -93,40 +96,40 @@ void ff_spatial_idwt_slice2(DWTContext *d, int y);
 
 // shared stuff for simd optimizations
 #define COMPOSE_53iL0(b0, b1, b2)\
-    (b1 - ((b0 + b2 + 2) >> 2))
+    (b1 - (unsigned)((int)(b0 + (unsigned)(b2) + 2) >> 2))
 
 #define COMPOSE_DIRAC53iH0(b0, b1, b2)\
-    (b1 + ((b0 + b2 + 1) >> 1))
+    (b1 + (unsigned)((int)(b0 + (unsigned)(b2) + 1) >> 1))
 
 #define COMPOSE_DD97iH0(b0, b1, b2, b3, b4)\
-    (b2 + ((int)(-b0 + 9U*b1 + 9U*b3 - b4 + 8) >> 4))
+    (int)(((unsigned)(b2) + ((int)(9U*b1 + 9U*b3 - b4 - b0 +  8) >> 4)))
 
 #define COMPOSE_DD137iL0(b0, b1, b2, b3, b4)\
-    (b2 - ((-b0 + 9*b1 + 9*b3 - b4 + 16) >> 5))
+    (int)(((unsigned)(b2) - ((int)(9U*b1 + 9U*b3 - b4 - b0 + 16) >> 5)))
 
 #define COMPOSE_HAARiL0(b0, b1)\
-    (b0 - ((b1 + 1) >> 1))
+    ((int)(b0 - (unsigned)((int)(b1 + 1U) >> 1)))
 
 #define COMPOSE_HAARiH0(b0, b1)\
-    (b0 + b1)
+    ((int)(b0 + (unsigned)(b1)))
 
 #define COMPOSE_FIDELITYiL0(b0, b1, b2, b3, b4, b5, b6, b7, b8)\
-    (b4 - ((-8*(b0+b8) + 21*(b1+b7) - 46*(b2+b6) + 161*(b3+b5) + 128) >> 8))
+    ((unsigned)b4 - ((int)(-8*(b0+(unsigned)b8) + 21*(b1+(unsigned)b7) - 46*(b2+(unsigned)b6) + 161*(b3+(unsigned)b5) + 128) >> 8))
 
 #define COMPOSE_FIDELITYiH0(b0, b1, b2, b3, b4, b5, b6, b7, b8)\
-    (b4 + ((-2*(b0+b8) + 10*(b1+b7) - 25*(b2+b6) + 81*(b3+b5) + 128) >> 8))
+    ((unsigned)b4 + ((int)(-2*(b0+(unsigned)b8) + 10*(b1+(unsigned)b7) - 25*(b2+(unsigned)b6) +  81*(b3+(unsigned)b5) + 128) >> 8))
 
 #define COMPOSE_DAUB97iL1(b0, b1, b2)\
-    (b1 - ((int)(1817*(b0 + (unsigned)b2) + 2048) >> 12))
+    ((unsigned)(b1) - ((int)(1817*(b0 + (unsigned)b2) + 2048) >> 12))
 
 #define COMPOSE_DAUB97iH1(b0, b1, b2)\
-    (b1 - ((int)( 113*(b0 + (unsigned)b2) + 64) >> 7))
+    ((unsigned)(b1) - ((int)( 113*(b0 + (unsigned)b2) + 64) >> 7))
 
 #define COMPOSE_DAUB97iL0(b0, b1, b2)\
-    (b1 + ((int)( 217*(b0 + (unsigned)b2) + 2048) >> 12))
+    ((unsigned)(b1) + ((int)( 217*(b0 + (unsigned)b2) + 2048) >> 12))
 
 #define COMPOSE_DAUB97iH0(b0, b1, b2)\
-    (b1 + ((int)(6497*(b0 + (unsigned)b2) + 2048) >> 12))
+    ((unsigned)(b1) + ((int)(6497*(b0 + (unsigned)b2) + 2048) >> 12))
 
 
 #endif /* AVCODEC_DWT_H */

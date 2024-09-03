@@ -1,6 +1,6 @@
 /*
  * Chromaprint fingerprinting muxer
- * Copyright (c) 2015 Rodger Combs
+ * Copyright (c) 2015 rcombs
  *
  * This file is part of FFmpeg.
  *
@@ -20,13 +20,16 @@
  */
 
 #include "avformat.h"
+#include "mux.h"
 #include "libavutil/opt.h"
-#include "libavcodec/internal.h"
+#include "libavutil/thread.h"
 #include <chromaprint.h>
 
 #define CPR_VERSION_INT AV_VERSION_INT(CHROMAPRINT_VERSION_MAJOR, \
                                        CHROMAPRINT_VERSION_MINOR, \
                                        CHROMAPRINT_VERSION_PATCH)
+
+static AVMutex chromaprint_mutex = AV_MUTEX_INITIALIZER;
 
 typedef enum FingerprintFormat {
     FINGERPRINT_RAW,
@@ -46,96 +49,91 @@ typedef struct ChromaprintMuxContext {
 #endif
 } ChromaprintMuxContext;
 
-static void cleanup(ChromaprintMuxContext *cpr)
+static void deinit(AVFormatContext *s)
 {
+    ChromaprintMuxContext *const cpr = s->priv_data;
+
     if (cpr->ctx) {
-        avpriv_lock_avformat();
+        ff_mutex_lock(&chromaprint_mutex);
         chromaprint_free(cpr->ctx);
-        avpriv_unlock_avformat();
+        ff_mutex_unlock(&chromaprint_mutex);
     }
 }
 
-static int write_header(AVFormatContext *s)
+static av_cold int init(AVFormatContext *s)
 {
     ChromaprintMuxContext *cpr = s->priv_data;
     AVStream *st;
 
-    avpriv_lock_avformat();
+    ff_mutex_lock(&chromaprint_mutex);
     cpr->ctx = chromaprint_new(cpr->algorithm);
-    avpriv_unlock_avformat();
+    ff_mutex_unlock(&chromaprint_mutex);
 
     if (!cpr->ctx) {
         av_log(s, AV_LOG_ERROR, "Failed to create chromaprint context.\n");
-        return AVERROR(ENOMEM);
+        return AVERROR_EXTERNAL;
     }
 
     if (cpr->silence_threshold != -1) {
 #if CPR_VERSION_INT >= AV_VERSION_INT(0, 7, 0)
         if (!chromaprint_set_option(cpr->ctx, "silence_threshold", cpr->silence_threshold)) {
-            av_log(s, AV_LOG_ERROR, "Failed to set silence threshold.\n");
-            goto fail;
+            av_log(s, AV_LOG_ERROR, "Failed to set silence threshold. Setting silence_threshold requires -algorithm 3 option.\n");
+            return AVERROR_EXTERNAL;
         }
 #else
         av_log(s, AV_LOG_ERROR, "Setting the silence threshold requires Chromaprint "
                                 "version 0.7.0 or later.\n");
-        goto fail;
+        return AVERROR(ENOSYS);
 #endif
-    }
-
-    if (s->nb_streams != 1) {
-        av_log(s, AV_LOG_ERROR, "Only one stream is supported\n");
-        goto fail;
     }
 
     st = s->streams[0];
 
-    if (st->codecpar->channels > 2) {
+    if (st->codecpar->ch_layout.nb_channels > 2) {
         av_log(s, AV_LOG_ERROR, "Only up to 2 channels are supported\n");
-        goto fail;
+        return AVERROR(EINVAL);
     }
 
     if (st->codecpar->sample_rate < 1000) {
         av_log(s, AV_LOG_ERROR, "Sampling rate must be at least 1000\n");
-        goto fail;
+        return AVERROR(EINVAL);
     }
 
-    if (!chromaprint_start(cpr->ctx, st->codecpar->sample_rate, st->codecpar->channels)) {
+    if (!chromaprint_start(cpr->ctx, st->codecpar->sample_rate, st->codecpar->ch_layout.nb_channels)) {
         av_log(s, AV_LOG_ERROR, "Failed to start chromaprint\n");
-        goto fail;
+        return AVERROR_EXTERNAL;
     }
 
     return 0;
-fail:
-    cleanup(cpr);
-    return AVERROR(EINVAL);
 }
 
 static int write_packet(AVFormatContext *s, AVPacket *pkt)
 {
     ChromaprintMuxContext *cpr = s->priv_data;
-    return chromaprint_feed(cpr->ctx, pkt->data, pkt->size / 2) ? 0 : AVERROR(EINVAL);
+    return chromaprint_feed(cpr->ctx, (const int16_t *)pkt->data, pkt->size / 2) ? 0 : AVERROR(EINVAL);
 }
 
 static int write_trailer(AVFormatContext *s)
 {
     ChromaprintMuxContext *cpr = s->priv_data;
     AVIOContext *pb = s->pb;
-    void *fp = NULL, *enc_fp = NULL;
-    int size, enc_size, ret = AVERROR(EINVAL);
+    void *fp = NULL;
+    char *enc_fp = NULL;
+    int size, enc_size, ret = AVERROR_EXTERNAL;
 
     if (!chromaprint_finish(cpr->ctx)) {
         av_log(s, AV_LOG_ERROR, "Failed to generate fingerprint\n");
         goto fail;
     }
 
-    if (!chromaprint_get_raw_fingerprint(cpr->ctx, &fp, &size)) {
+    if (!chromaprint_get_raw_fingerprint(cpr->ctx, (uint32_t **)&fp, &size)) {
         av_log(s, AV_LOG_ERROR, "Failed to retrieve fingerprint\n");
         goto fail;
     }
 
     switch (cpr->fp_format) {
     case FINGERPRINT_RAW:
-        avio_write(pb, fp, size);
+        avio_write(pb, fp, size * 4); //fp points to array of uint32_t
         break;
     case FINGERPRINT_COMPRESSED:
     case FINGERPRINT_BASE64:
@@ -154,7 +152,6 @@ fail:
         chromaprint_dealloc(fp);
     if (enc_fp)
         chromaprint_dealloc(enc_fp);
-    cleanup(cpr);
     return ret;
 }
 
@@ -163,10 +160,10 @@ fail:
 static const AVOption options[] = {
     { "silence_threshold", "threshold for detecting silence", OFFSET(silence_threshold), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 32767, FLAGS },
     { "algorithm", "version of the fingerprint algorithm", OFFSET(algorithm), AV_OPT_TYPE_INT, { .i64 = CHROMAPRINT_ALGORITHM_DEFAULT }, CHROMAPRINT_ALGORITHM_TEST1, INT_MAX, FLAGS },
-    { "fp_format", "fingerprint format to write", OFFSET(fp_format), AV_OPT_TYPE_INT, { .i64 = FINGERPRINT_BASE64 }, FINGERPRINT_RAW, FINGERPRINT_BASE64, FLAGS },
-    { "raw", "binary raw fingerprint", 0, AV_OPT_TYPE_CONST, {.i64 = FINGERPRINT_RAW }, INT_MIN, INT_MAX, FLAGS, "fp_format"},
-    { "compressed", "binary compressed fingerprint", 0, AV_OPT_TYPE_CONST, {.i64 = FINGERPRINT_COMPRESSED }, INT_MIN, INT_MAX, FLAGS, "fp_format"},
-    { "base64", "Base64 compressed fingerprint", 0, AV_OPT_TYPE_CONST, {.i64 = FINGERPRINT_BASE64 }, INT_MIN, INT_MAX, FLAGS, "fp_format"},
+    { "fp_format", "fingerprint format to write", OFFSET(fp_format), AV_OPT_TYPE_INT, { .i64 = FINGERPRINT_BASE64 }, FINGERPRINT_RAW, FINGERPRINT_BASE64, FLAGS, .unit = "fp_format" },
+    { "raw", "binary raw fingerprint", 0, AV_OPT_TYPE_CONST, {.i64 = FINGERPRINT_RAW }, INT_MIN, INT_MAX, FLAGS, .unit = "fp_format"},
+    { "compressed", "binary compressed fingerprint", 0, AV_OPT_TYPE_CONST, {.i64 = FINGERPRINT_COMPRESSED }, INT_MIN, INT_MAX, FLAGS, .unit = "fp_format"},
+    { "base64", "Base64 compressed fingerprint", 0, AV_OPT_TYPE_CONST, {.i64 = FINGERPRINT_BASE64 }, INT_MIN, INT_MAX, FLAGS, .unit = "fp_format"},
     { NULL },
 };
 
@@ -177,14 +174,19 @@ static const AVClass chromaprint_class = {
     .version    = LIBAVUTIL_VERSION_INT,
 };
 
-AVOutputFormat ff_chromaprint_muxer = {
-    .name              = "chromaprint",
-    .long_name         = NULL_IF_CONFIG_SMALL("Chromaprint"),
+const FFOutputFormat ff_chromaprint_muxer = {
+    .p.name            = "chromaprint",
+    .p.long_name       = NULL_IF_CONFIG_SMALL("Chromaprint"),
     .priv_data_size    = sizeof(ChromaprintMuxContext),
-    .audio_codec       = AV_NE(AV_CODEC_ID_PCM_S16BE, AV_CODEC_ID_PCM_S16LE),
-    .write_header      = write_header,
+    .p.audio_codec     = AV_NE(AV_CODEC_ID_PCM_S16BE, AV_CODEC_ID_PCM_S16LE),
+    .p.video_codec     = AV_CODEC_ID_NONE,
+    .p.subtitle_codec  = AV_CODEC_ID_NONE,
+    .flags_internal    = FF_OFMT_FLAG_MAX_ONE_OF_EACH |
+                         FF_OFMT_FLAG_ONLY_DEFAULT_CODECS,
+    .init              = init,
     .write_packet      = write_packet,
     .write_trailer     = write_trailer,
-    .flags             = AVFMT_NOTIMESTAMPS,
-    .priv_class        = &chromaprint_class,
+    .deinit            = deinit,
+    .p.flags           = AVFMT_NOTIMESTAMPS,
+    .p.priv_class      = &chromaprint_class,
 };

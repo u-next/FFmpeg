@@ -23,6 +23,7 @@
 
 #include "avformat.h"
 #include "avio.h"
+#include "demux.h"
 #include "internal.h"
 
 typedef struct GDVContext {
@@ -34,7 +35,7 @@ typedef struct GDVContext {
     unsigned pal[256];
 } GDVContext;
 
-static int gdv_read_probe(AVProbeData *p)
+static int gdv_read_probe(const AVProbeData *p)
 {
     if (AV_RL32(p->buf) == 0x29111994)
         return AVPROBE_SCORE_MAX;
@@ -42,7 +43,7 @@ static int gdv_read_probe(AVProbeData *p)
     return 0;
 }
 
-struct {
+static struct {
     uint16_t id;
     uint16_t width;
     uint16_t height;
@@ -86,6 +87,9 @@ static int gdv_read_header(AVFormatContext *ctx)
     vst->nb_frames         = avio_rl16(pb);
 
     fps = avio_rl16(pb);
+    if (!fps)
+        return AVERROR_INVALIDDATA;
+
     snd_flags = avio_rl16(pb);
     if (snd_flags & 1) {
         ast = avformat_new_stream(ctx, 0);
@@ -96,7 +100,7 @@ static int gdv_read_header(AVFormatContext *ctx)
         ast->codecpar->codec_type  = AVMEDIA_TYPE_AUDIO;
         ast->codecpar->codec_tag   = 0;
         ast->codecpar->sample_rate = avio_rl16(pb);
-        ast->codecpar->channels    = 1 + !!(snd_flags & 2);
+        ast->codecpar->ch_layout.nb_channels = 1 + !!(snd_flags & 2);
         if (snd_flags & 8) {
             ast->codecpar->codec_id = AV_CODEC_ID_GREMLIN_DPCM;
         } else {
@@ -105,7 +109,8 @@ static int gdv_read_header(AVFormatContext *ctx)
 
         avpriv_set_pts_info(ast, 64, 1, ast->codecpar->sample_rate);
         gdv->audio_size = (ast->codecpar->sample_rate / fps) *
-                           ast->codecpar->channels * (1 + !!(snd_flags & 4)) / (1 + !!(snd_flags & 8));
+                           ast->codecpar->ch_layout.nb_channels *
+                           (1 + !!(snd_flags & 4)) / (1 + !!(snd_flags & 8));
         gdv->is_audio = 1;
     } else {
         avio_skip(pb, 2);
@@ -179,7 +184,6 @@ static int gdv_read_packet(AVFormatContext *ctx, AVPacket *pkt)
             pal = av_packet_new_side_data(pkt, AV_PKT_DATA_PALETTE,
                                           AVPALETTE_SIZE);
             if (!pal) {
-                av_packet_unref(pkt);
                 return AVERROR(ENOMEM);
             }
             memcpy(pal, gdv->pal, AVPALETTE_SIZE);
@@ -191,9 +195,9 @@ static int gdv_read_packet(AVFormatContext *ctx, AVPacket *pkt)
     return 0;
 }
 
-AVInputFormat ff_gdv_demuxer = {
-    .name           = "gdv",
-    .long_name      = NULL_IF_CONFIG_SMALL("Gremlin Digital Video"),
+const FFInputFormat ff_gdv_demuxer = {
+    .p.name         = "gdv",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Gremlin Digital Video"),
     .priv_data_size = sizeof(GDVContext),
     .read_probe     = gdv_read_probe,
     .read_header    = gdv_read_header,

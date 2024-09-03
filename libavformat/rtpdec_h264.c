@@ -37,6 +37,7 @@
 #include "libavutil/base64.h"
 #include "libavutil/intreadwrite.h"
 #include "libavutil/avstring.h"
+#include "libavutil/mem.h"
 #include "avformat.h"
 
 #include "rtpdec.h"
@@ -408,7 +409,7 @@ static int parse_h264_sdp_line(AVFormatContext *s, int st_index,
     return 0;
 }
 
-RTPDynamicProtocolHandler ff_h264_dynamic_handler = {
+const RTPDynamicProtocolHandler ff_h264_dynamic_handler = {
     .enc_name         = "H264",
     .codec_type       = AVMEDIA_TYPE_VIDEO,
     .codec_id         = AV_CODEC_ID_H264,

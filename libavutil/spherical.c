@@ -18,6 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "avstring.h"
+#include "macros.h"
 #include "mem.h"
 #include "spherical.h"
 
@@ -26,6 +28,8 @@ AVSphericalMapping *av_spherical_alloc(size_t *size)
     AVSphericalMapping *spherical = av_mallocz(sizeof(AVSphericalMapping));
     if (!spherical)
         return NULL;
+
+    spherical->projection = AV_SPHERICAL_RECTILINEAR;
 
     if (size)
         *size = sizeof(*spherical);
@@ -51,10 +55,13 @@ void av_spherical_tile_bounds(const AVSphericalMapping *map,
     *bottom = orig_height - height - *top;
 }
 
-static const char *spherical_projection_names[] = {
+static const char *const spherical_projection_names[] = {
     [AV_SPHERICAL_EQUIRECTANGULAR]      = "equirectangular",
     [AV_SPHERICAL_CUBEMAP]              = "cubemap",
     [AV_SPHERICAL_EQUIRECTANGULAR_TILE] = "tiled equirectangular",
+    [AV_SPHERICAL_HALF_EQUIRECTANGULAR] = "half equirectangular",
+    [AV_SPHERICAL_RECTILINEAR]          = "rectilinear",
+    [AV_SPHERICAL_FISHEYE]              = "fisheye",
 };
 
 const char *av_spherical_projection_name(enum AVSphericalProjection projection)
@@ -70,8 +77,7 @@ int av_spherical_from_name(const char *name)
     int i;
 
     for (i = 0; i < FF_ARRAY_ELEMS(spherical_projection_names); i++) {
-        size_t len = strlen(spherical_projection_names[i]);
-        if (!strncmp(spherical_projection_names[i], name, len))
+        if (av_strstart(name, spherical_projection_names[i], NULL))
             return i;
     }
 

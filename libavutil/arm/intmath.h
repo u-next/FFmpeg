@@ -65,17 +65,29 @@ static av_always_inline av_const int av_clip_int16_arm(int a)
 #define av_clip_intp2 av_clip_intp2_arm
 static av_always_inline av_const int av_clip_intp2_arm(int a, int p)
 {
-    unsigned x;
-    __asm__ ("ssat %0, %2, %1" : "=r"(x) : "r"(a), "i"(p+1));
-    return x;
+    if (av_builtin_constant_p(p)) {
+        unsigned x;
+        __asm__ ("ssat %0, %2, %1" : "=r"(x) : "r"(a), "i"(p+1));
+        return x;
+    } else {
+        if (((unsigned)a + (1 << p)) & ~((2 << p) - 1))
+            return (a >> 31) ^ ((1 << p) - 1);
+        else
+            return a;
+    }
 }
 
 #define av_clip_uintp2 av_clip_uintp2_arm
 static av_always_inline av_const unsigned av_clip_uintp2_arm(int a, int p)
 {
-    unsigned x;
-    __asm__ ("usat %0, %2, %1" : "=r"(x) : "r"(a), "i"(p));
-    return x;
+    if (av_builtin_constant_p(p)) {
+        unsigned x;
+        __asm__ ("usat %0, %2, %1" : "=r"(x) : "r"(a), "i"(p));
+        return x;
+    } else {
+        if (a & ~((1<<p) - 1)) return (~a) >> 31 & ((1<<p) - 1);
+        else                   return  a;
+    }
 }
 
 #define av_sat_add32 av_sat_add32_arm
@@ -91,6 +103,22 @@ static av_always_inline int av_sat_dadd32_arm(int a, int b)
 {
     int r;
     __asm__ ("qdadd %0, %1, %2" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+#define av_sat_sub32 av_sat_sub32_arm
+static av_always_inline int av_sat_sub32_arm(int a, int b)
+{
+    int r;
+    __asm__ ("qsub %0, %1, %2" : "=r"(r) : "r"(a), "r"(b));
+    return r;
+}
+
+#define av_sat_dsub32 av_sat_dsub32_arm
+static av_always_inline int av_sat_dsub32_arm(int a, int b)
+{
+    int r;
+    __asm__ ("qdsub %0, %1, %2" : "=r"(r) : "r"(a), "r"(b));
     return r;
 }
 

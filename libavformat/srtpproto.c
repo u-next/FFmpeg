@@ -21,10 +21,8 @@
 
 #include "libavutil/opt.h"
 #include "avformat.h"
-#include "avio_internal.h"
 #include "url.h"
 
-#include "internal.h"
 #include "rtpdec.h"
 #include "srtp.h"
 
@@ -59,12 +57,11 @@ static int srtp_close(URLContext *h)
     SRTPProtoContext *s = h->priv_data;
     ff_srtp_free(&s->srtp_out);
     ff_srtp_free(&s->srtp_in);
-    ffurl_close(s->rtp_hd);
-    s->rtp_hd = NULL;
+    ffurl_closep(&s->rtp_hd);
     return 0;
 }
 
-static int srtp_open(URLContext *h, const char *uri, int flags)
+static int srtp_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
 {
     SRTPProtoContext *s = h->priv_data;
     char hostname[256], buf[1024], path[1024];
@@ -81,7 +78,7 @@ static int srtp_open(URLContext *h, const char *uri, int flags)
                  path, sizeof(path), uri);
     ff_url_join(buf, sizeof(buf), "rtp", NULL, hostname, rtp_port, "%s", path);
     if ((ret = ffurl_open_whitelist(&s->rtp_hd, buf, flags, &h->interrupt_callback,
-                                    NULL, h->protocol_whitelist, h->protocol_blacklist, h)) < 0)
+                                    options, h->protocol_whitelist, h->protocol_blacklist, h)) < 0)
         goto fail;
 
     h->max_packet_size = FFMIN(s->rtp_hd->max_packet_size,
@@ -134,7 +131,7 @@ static int srtp_get_multi_file_handle(URLContext *h, int **handles,
 
 const URLProtocol ff_srtp_protocol = {
     .name                      = "srtp",
-    .url_open                  = srtp_open,
+    .url_open2                 = srtp_open,
     .url_read                  = srtp_read,
     .url_write                 = srtp_write,
     .url_close                 = srtp_close,

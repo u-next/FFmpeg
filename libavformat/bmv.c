@@ -20,7 +20,9 @@
  */
 
 #include "libavutil/channel_layout.h"
+#include "libavutil/mem.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 enum BMVFlags {
@@ -58,8 +60,7 @@ static int bmv_read_header(AVFormatContext *s)
         return AVERROR(ENOMEM);
     ast->codecpar->codec_type      = AVMEDIA_TYPE_AUDIO;
     ast->codecpar->codec_id        = AV_CODEC_ID_BMV_AUDIO;
-    ast->codecpar->channels        = 2;
-    ast->codecpar->channel_layout  = AV_CH_LAYOUT_STEREO;
+    ast->codecpar->ch_layout       = (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
     ast->codecpar->sample_rate     = 22050;
     avpriv_set_pts_info(ast, 16, 1, 22050);
 
@@ -96,8 +97,8 @@ static int bmv_read_packet(AVFormatContext *s, AVPacket *pkt)
                        audio_size, c->size);
                 return AVERROR_INVALIDDATA;
             }
-            if (av_new_packet(pkt, audio_size) < 0)
-                return AVERROR(ENOMEM);
+            if ((err = av_new_packet(pkt, audio_size)) < 0)
+                return err;
             memcpy(pkt->data, c->packet + 1, pkt->size);
             pkt->stream_index = 1;
             pkt->pts          = c->audio_pos;
@@ -108,8 +109,8 @@ static int bmv_read_packet(AVFormatContext *s, AVPacket *pkt)
         } else
             break;
     }
-    if (av_new_packet(pkt, c->size + 1) < 0)
-        return AVERROR(ENOMEM);
+    if ((err = av_new_packet(pkt, c->size + 1)) < 0)
+        return err;
     pkt->stream_index = 0;
     c->get_next = 1;
     memcpy(pkt->data, c->packet, pkt->size);
@@ -125,12 +126,12 @@ static int bmv_read_close(AVFormatContext *s)
     return 0;
 }
 
-AVInputFormat ff_bmv_demuxer = {
-    .name           = "bmv",
-    .long_name      = NULL_IF_CONFIG_SMALL("Discworld II BMV"),
+const FFInputFormat ff_bmv_demuxer = {
+    .p.name         = "bmv",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Discworld II BMV"),
+    .p.extensions   = "bmv",
     .priv_data_size = sizeof(BMVContext),
     .read_header    = bmv_read_header,
     .read_packet    = bmv_read_packet,
     .read_close     = bmv_read_close,
-    .extensions     = "bmv",
 };

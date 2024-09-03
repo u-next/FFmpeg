@@ -26,13 +26,16 @@
  */
 
 #include "libavutil/intreadwrite.h"
+#include "libavutil/mem.h"
 #include "libavcodec/bmp.h"
 #include "libavutil/intfloat.h"
 #include "avformat.h"
+#include "demux.h"
 #include "internal.h"
 
 typedef struct {
     uint64_t pts;
+    uint64_t maxsize;
 } CineDemuxContext;
 
 /** Compression */
@@ -56,7 +59,7 @@ enum {
 #define CFA_BLGRAY  0x20000000U
 #define CFA_BRGRAY  0x10000000U
 
-static int cine_read_probe(AVProbeData *p)
+static int cine_read_probe(const AVProbeData *p)
 {
     int HeaderSize;
     if (p->buf[0] == 'C' && p->buf[1] == 'I' &&  // Type
@@ -168,6 +171,10 @@ static int cine_read_header(AVFormatContext *avctx)
     avio_skip(pb, 616); // Binning .. bFlipH
     if (!avio_rl32(pb) ^ vflip) {
         st->codecpar->extradata  = av_strdup("BottomUp");
+        if (!st->codecpar->extradata) {
+            st->codecpar->extradata_size = 0;
+            return AVERROR(ENOMEM);
+        }
         st->codecpar->extradata_size  = 9;
     }
 
@@ -268,10 +275,11 @@ static int cine_read_header(AVFormatContext *avctx)
     /* parse image offsets */
     avio_seek(pb, offImageOffsets, SEEK_SET);
     for (i = 0; i < st->duration; i++) {
-        if (avio_feof(pb))
+        int64_t pos = avio_rl64(pb);
+        if (avio_feof(pb) || pos < 0)
             return AVERROR_INVALIDDATA;
 
-        av_add_index_entry(st, avio_rl64(pb), i, 0, 0, AVINDEX_KEYFRAME);
+        av_add_index_entry(st, pos, i, 0, 0, AVINDEX_KEYFRAME);
     }
 
     return 0;
@@ -281,22 +289,34 @@ static int cine_read_packet(AVFormatContext *avctx, AVPacket *pkt)
 {
     CineDemuxContext *cine = avctx->priv_data;
     AVStream *st = avctx->streams[0];
+    FFStream *const sti = ffstream(st);
     AVIOContext *pb = avctx->pb;
     int n, size, ret;
+    int64_t ret64;
 
-    if (cine->pts >= st->duration)
+    if (cine->pts >= sti->nb_index_entries)
         return AVERROR_EOF;
 
-    avio_seek(pb, st->index_entries[cine->pts].pos, SEEK_SET);
+    ret64 = avio_seek(pb, sti->index_entries[cine->pts].pos, SEEK_SET);
+    if (ret64 < 0)
+        return ret64;
     n = avio_rl32(pb);
     if (n < 8)
         return AVERROR_INVALIDDATA;
     avio_skip(pb, n - 8);
     size = avio_rl32(pb);
+    if (avio_feof(pb) || size < 0)
+        return AVERROR_INVALIDDATA;
+
+    if (cine->maxsize && (uint64_t)sti->index_entries[cine->pts].pos + size + n > cine->maxsize)
+        size = cine->maxsize - sti->index_entries[cine->pts].pos - n;
 
     ret = av_get_packet(pb, pkt, size);
     if (ret < 0)
         return ret;
+
+    if (ret != size)
+        cine->maxsize = (uint64_t)sti->index_entries[cine->pts].pos + n + ret;
 
     pkt->pts = cine->pts++;
     pkt->stream_index = 0;
@@ -318,9 +338,9 @@ static int cine_read_seek(AVFormatContext *avctx, int stream_index, int64_t time
     return 0;
 }
 
-AVInputFormat ff_cine_demuxer = {
-    .name           = "cine",
-    .long_name      = NULL_IF_CONFIG_SMALL("Phantom Cine"),
+const FFInputFormat ff_cine_demuxer = {
+    .p.name         = "cine",
+    .p.long_name    = NULL_IF_CONFIG_SMALL("Phantom Cine"),
     .priv_data_size = sizeof(CineDemuxContext),
     .read_probe     = cine_read_probe,
     .read_header    = cine_read_header,

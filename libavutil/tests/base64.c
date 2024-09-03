@@ -17,12 +17,14 @@
  */
 
 // LCOV_EXCL_START
+
+#include "libavutil/timer.h"
+
 #include <stdint.h>
 #include <stdio.h>
 
 #include "libavutil/common.h"
 #include "libavutil/base64.h"
-#include "libavutil/timer.h"
 
 #define MAX_DATA_SIZE    1024
 #define MAX_ENCODED_SIZE 2048
@@ -60,6 +62,16 @@ static int test_encode_decode(const uint8_t *data, unsigned int data_size,
     }
     if (av_base64_decode(NULL, encoded, 0) != 0) {
         printf("Failed: decode to NULL buffer\n");
+        return 1;
+    }
+    if (data_size > 0 && (data2_size = av_base64_decode(data2, encoded, data_size - 1)) != data_size - 1) {
+        printf("Failed: out of array write\n"
+               "Encoded:\n%s\n", encoded);
+        return 1;
+    }
+    if (data_size > 1 && (data2_size = av_base64_decode(data2, encoded, data_size - 2)) != data_size - 2) {
+        printf("Failed: out of array write\n"
+               "Encoded:\n%s\n", encoded);
         return 1;
     }
     if (strlen(encoded)) {

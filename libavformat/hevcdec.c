@@ -19,12 +19,12 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "libavcodec/hevc.h"
+#include "libavcodec/hevc/hevc.h"
 
 #include "avformat.h"
 #include "rawdec.h"
 
-static int hevc_probe(AVProbeData *p)
+static int hevc_probe(const AVProbeData *p)
 {
     uint32_t code = -1;
     int vps = 0, sps = 0, pps = 0, irap = 0;
