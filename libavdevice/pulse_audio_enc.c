@@ -25,14 +25,25 @@
 #include "libavformat/internal.h"
 #include "libavformat/mux.h"
 #include "libavformat/version.h"
+#include "libavutil/avutil.h"
 #include "libavutil/channel_layout.h"
+#include "libavutil/error.h"
 #include "libavutil/frame.h"
 #include "libavutil/internal.h"
 #include "libavutil/opt.h"
+#include "libavutil/pixfmt.h"
 #include "libavutil/time.h"
 #include "libavutil/log.h"
 #include "libavutil/attributes.h"
 #include "pulse_audio_common.h"
+#include "v4l2-common.h"
+#include "libavutil/imgutils.h"
+#include "libavutil/pixdesc.h"
+
+typedef struct {
+    AVClass *class;
+    int fd;
+} V4L2Context;
 
 typedef struct PulseData {
     AVClass *class;
@@ -53,7 +64,89 @@ typedef struct PulseData {
     int mute;
     pa_volume_t base_volume;
     pa_volume_t last_volume;
+    V4L2Context v4l2; // ridiculous hack, who PAYS me to commit such heinous crimes
 } PulseData;
+
+static inline int get_stream_index(AVFormatContext *h, enum AVMediaType type) {
+    int res_ix = -1;
+    for (int ix = 0; ix < h->nb_streams; ix += 1) {
+        AVStream *st = h->streams[ix];
+        if (st->codecpar->codec_type == type) {
+            res_ix = ix;
+        }
+    }
+    return res_ix;
+}
+
+static av_cold int write_header_v4l2(AVFormatContext *s1, V4L2Context *s) {
+    int res = 0, flags = O_RDWR;
+    struct v4l2_format fmt = {
+        .type = V4L2_BUF_TYPE_VIDEO_OUTPUT
+    };
+    AVCodecParameters *par;
+    uint32_t v4l2_pixfmt;
+
+    int stream_ix = get_stream_index(s1, AVMEDIA_TYPE_VIDEO);
+    if (stream_ix == -1) {
+        av_log(s1, AV_LOG_WARNING, "Failed to find video stream\n");
+        return 0; // treated as non-fatal
+    }
+
+    if (s1->flags & AVFMT_FLAG_NONBLOCK)
+        flags |= O_NONBLOCK;
+
+    s->fd = open("/dev/video0", flags);
+    if (s->fd < 0) {
+        res = AVERROR(errno);
+        av_log(s1, AV_LOG_ERROR, "Unable to open V4L2 device '%s'\n", s1->url);
+        return res;
+    }
+
+    /* if (s1->nb_streams != 1 || */
+    /*     s1->streams[0]->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) { */
+    /*     av_log(s1, AV_LOG_ERROR, */
+    /*            "V4L2 output device supports only a single raw video stream\n"); */
+    /*     return AVERROR(EINVAL); */
+    /* } */
+
+
+    par = s1->streams[stream_ix]->codecpar;
+
+    /* if(par->codec_id == AV_CODEC_ID_RAWVIDEO) { */
+    /*     v4l2_pixfmt = ff_fmt_ff2v4l(par->format, AV_CODEC_ID_RAWVIDEO); */
+    /* } else { */
+    /*     v4l2_pixfmt = ff_fmt_ff2v4l(AV_PIX_FMT_NONE, par->codec_id); */
+    /* } */
+
+    v4l2_pixfmt = AV_PIX_FMT_YUV420P;
+
+    /* if (!v4l2_pixfmt) { // XXX: try to force them one by one? */
+    /*     av_log(s1, AV_LOG_ERROR, "Unknown V4L2 pixel format equivalent for %s\n", */
+    /*            av_get_pix_fmt_name(par->format)); */
+    /*     return AVERROR(EINVAL); */
+    /* } */
+
+    /* av_log(s1, AV_LOG_WARNING, "Using pixfmt %s\n", av_get_pix_fmt_name(par->format)); */
+
+    if (ioctl(s->fd, VIDIOC_G_FMT, &fmt) < 0) {
+        res = AVERROR(errno);
+        av_log(s1, AV_LOG_ERROR, "ioctl(VIDIOC_G_FMT): %s\n", av_err2str(res));
+        return res;
+    }
+
+    fmt.fmt.pix.width       = par->width;
+    fmt.fmt.pix.height      = par->height;
+    fmt.fmt.pix.pixelformat = v4l2_pixfmt;
+    fmt.fmt.pix.sizeimage   = av_image_get_buffer_size(par->format, par->width, par->height, 1);
+
+    if (ioctl(s->fd, VIDIOC_S_FMT, &fmt) < 0) {
+        res = AVERROR(errno);
+        av_log(s1, AV_LOG_ERROR, "ioctl(VIDIOC_S_FMT): %s\n", av_err2str(res));
+        return res;
+    }
+
+    return res;
+}
 
 static void pulse_audio_sink_device_cb(pa_context *ctx, const pa_sink_info *dev,
                                        int eol, void *userdata)
@@ -411,7 +504,7 @@ static void pulse_map_channels_to_pulse(const AVChannelLayout *channel_layout, p
         channel_map->map[channel_map->channels++] = PA_CHANNEL_POSITION_LFE;
 }
 
-static av_cold int pulse_write_trailer(AVFormatContext *h)
+static av_cold int pulse_write_trailer_audio(AVFormatContext *h)
 {
     PulseData *s = h->priv_data;
 
@@ -442,10 +535,31 @@ static av_cold int pulse_write_trailer(AVFormatContext *h)
     return 0;
 }
 
+static int write_trailer_video(AVFormatContext *s1)
+{
+    PulseData *handle = s1->priv_data;
+    V4L2Context s = handle->v4l2;
+    close(s.fd);
+    return 0;
+}
+
+static av_cold int pulse_write_trailer(AVFormatContext *h) {
+    for (int ix = 0; ix < h->nb_streams; ix += 1) {
+        AVStream *st = h->streams[ix];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+            write_trailer_video(h);
+        } else if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            pulse_write_trailer_audio(h);
+        }
+    }
+
+    // both functions can only return 0
+    return 0;
+}
+
 static av_cold int pulse_write_header(AVFormatContext *h)
 {
     PulseData *s = h->priv_data;
-    AVStream *st = NULL;
     int ret;
     pa_sample_spec sample_spec;
     pa_buffer_attr buffer_attributes = { -1, -1, -1, -1, -1 };
@@ -456,11 +570,20 @@ static av_cold int pulse_write_header(AVFormatContext *h)
                                                   PA_STREAM_AUTO_TIMING_UPDATE |
                                                   PA_STREAM_NOT_MONOTONIC;
 
-    if (h->nb_streams != 1 || h->streams[0]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) {
-        av_log(s, AV_LOG_ERROR, "Only a single audio stream is supported.\n");
-        return AVERROR(EINVAL);
+    
+    int v4l2_res = write_header_v4l2(h, &s->v4l2);
+    if (v4l2_res < 0) {
+        av_log(s, AV_LOG_ERROR, "Failed to initialize v4l2 in pulse output");
+        return AVERROR(ret);
     }
-    st = h->streams[0];
+
+    int stream_ix = get_stream_index(h, AVMEDIA_TYPE_AUDIO);
+    if (stream_ix == -1) {
+        av_log(h, AV_LOG_ERROR, "Failed to find video stream\n");
+        return AVERROR_STREAM_NOT_FOUND;
+    }
+
+    AVStream *st = h->streams[stream_ix];
 
     if (!stream_name) {
         if (h->url[0])
@@ -491,10 +614,10 @@ static av_cold int pulse_write_header(AVFormatContext *h)
     sample_spec.format = ff_codec_id_to_pulse_format(st->codecpar->codec_id);
     sample_spec.rate = st->codecpar->sample_rate;
     sample_spec.channels = st->codecpar->ch_layout.nb_channels;
-    if (!pa_sample_spec_valid(&sample_spec)) {
-        av_log(s, AV_LOG_ERROR, "Invalid sample spec.\n");
-        return AVERROR(EINVAL);
-    }
+    /* if (!pa_sample_spec_valid(&sample_spec)) { */
+    /*     av_log(s, AV_LOG_ERROR, "Invalid sample spec.\n"); */
+    /*     return AVERROR(EINVAL); */
+    /* } */
 
     if (sample_spec.channels == 1) {
         channel_map.channels = 1;
@@ -624,9 +747,11 @@ static av_cold int pulse_write_header(AVFormatContext *h)
     pa_threaded_mainloop_unlock(s->mainloop);
     pulse_write_trailer(h);
     return ret;
-}
+  }
 
-static int pulse_write_packet(AVFormatContext *h, AVPacket *pkt)
+
+
+static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
 {
     PulseData *s = h->priv_data;
     int ret;
@@ -641,7 +766,7 @@ static int pulse_write_packet(AVFormatContext *h, AVPacket *pkt)
     if (pkt->duration) {
         s->timestamp += pkt->duration;
     } else {
-        AVStream *st = h->streams[0];
+        AVStream *st = h->streams[pkt->stream_index];
         AVRational r = { 1, st->codecpar->sample_rate };
         int64_t samples = pkt->size / (av_get_bytes_per_sample(st->codecpar->format) * st->codecpar->ch_layout.nb_channels);
         s->timestamp += av_rescale_q(samples, r, st->time_base);
@@ -674,6 +799,33 @@ static int pulse_write_packet(AVFormatContext *h, AVPacket *pkt)
     pa_threaded_mainloop_unlock(s->mainloop);
     return AVERROR_EXTERNAL;
 }
+
+
+static int pulse_write_packet_video(AVFormatContext *h, AVPacket *pkt) {
+    const PulseData *s = h->priv_data;
+    int fd = s->v4l2.fd;
+    if (fd == 0) {
+        return 0;
+    }
+
+    if (write(fd, pkt->data, pkt->size) == -1) {
+        return AVERROR(errno);
+    }
+
+    return 0;
+}
+
+
+static int pulse_write_packet(AVFormatContext *h, AVPacket *pkt) {
+    AVStream *st = h->streams[pkt->stream_index];
+    if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
+        return pulse_write_packet_audio(h, pkt);
+    else if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
+        return pulse_write_packet_video(h, pkt);
+
+    return AVERROR(EIO);
+}
+
 
 static int pulse_write_frame(AVFormatContext *h, int stream_index,
                              AVFrame **frame, unsigned flags)
@@ -776,7 +928,7 @@ static const AVOption options[] = {
 };
 
 static const AVClass pulse_muxer_class = {
-    .class_name     = "PulseAudio outdev",
+    .class_name     = "PulseAudio outdev + v4l2",
     .item_name      = av_default_item_name,
     .option         = options,
     .version        = LIBAVUTIL_VERSION_INT,
@@ -788,10 +940,9 @@ const FFOutputFormat ff_pulse_muxer = {
     .p.long_name          = NULL_IF_CONFIG_SMALL("Pulse audio output"),
     .priv_data_size       = sizeof(PulseData),
     .p.audio_codec        = AV_NE(AV_CODEC_ID_PCM_S16BE, AV_CODEC_ID_PCM_S16LE),
-    .p.video_codec        = AV_CODEC_ID_NONE,
+    .p.video_codec        = AV_CODEC_ID_RAWVIDEO,
     .write_header         = pulse_write_header,
     .write_packet         = pulse_write_packet,
-    .write_uncoded_frame  = pulse_write_frame,
     .write_trailer        = pulse_write_trailer,
     .get_output_timestamp = pulse_get_output_timestamp,
     .get_device_list      = pulse_get_device_list,
