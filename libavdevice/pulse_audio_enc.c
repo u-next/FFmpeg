@@ -772,6 +772,8 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
         s->timestamp += av_rescale_q(samples, r, st->time_base);
     }
 
+    av_log(s, AV_LOG_INFO, "packet_type=audio timestamp=%llu packet_size=%d duration=%llu\n", pkt->dts, pkt->size, pkt->duration);
+
     pa_threaded_mainloop_lock(s->mainloop);
     if (!PA_STREAM_IS_GOOD(pa_stream_get_state(s->stream))) {
         av_log(s, AV_LOG_ERROR, "PulseAudio stream is in invalid state.\n");
@@ -807,6 +809,8 @@ static int pulse_write_packet_video(AVFormatContext *h, AVPacket *pkt) {
     if (fd == 0) {
         return 0;
     }
+
+    av_log(s, AV_LOG_INFO, "packet_type=video timestamp=%llu packet_size=%d duration=%llu\n", pkt->dts, pkt->size, pkt->duration);
 
     if (write(fd, pkt->data, pkt->size) == -1) {
         return AVERROR(errno);
