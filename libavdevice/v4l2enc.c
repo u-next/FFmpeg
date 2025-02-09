@@ -143,11 +143,12 @@ static void *output_thread_func(void *arg) {
         if (current_time >= next_frame_time) {
             AVPacket *pkt = buffer_pop(ctx);
             if (pkt) {
-                
                 if (write(ctx->fd, pkt->data, pkt->size) == -1) {
                     av_log(ctx, AV_LOG_ERROR, "Failed to write frame: %s\n", av_err2str(AVERROR(errno)));
                 }
                 av_packet_free(&pkt);
+                av_log(ctx, AV_LOG_DEBUG, "frame writtern to device, buffer level: %d/%d\n", 
+                       ctx->buffer_count, RING_BUFFER_SIZE);
                 next_frame_time += ctx->frame_interval;
                 ctx->last_output_time = current_time;
             } else if (ctx->thread_running) {
