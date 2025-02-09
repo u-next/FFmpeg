@@ -22,6 +22,7 @@
 #include "libavutil/pixdesc.h"
 #include "libavformat/avformat.h"
 #include "libavformat/mux.h"
+#include "libavutil/time.h"
 #include "v4l2-common.h"
 
 typedef struct {
@@ -87,12 +88,23 @@ static av_cold int write_header(AVFormatContext *s1)
         return res;
     }
 
+    av_log(s1, AV_LOG_INFO, "Frame rate: %d/%d\n", s1->streams[0]->time_base.num, s1->streams[0]->time_base.den);
+
     return res;
 }
 
 static int write_packet(AVFormatContext *s1, AVPacket *pkt)
 {
     const V4L2Context *s = s1->priv_data;
+    static int64_t last_call_time = 0;
+    int64_t current_time = av_gettime();
+    int64_t delta = last_call_time ? current_time - last_call_time : 0;
+
+    av_log(s, AV_LOG_INFO, "time:%lld dts:%llu size:%d duration:%llu delta:%lld us\n",
+           current_time, pkt->dts, pkt->size, pkt->duration, delta);
+    
+    last_call_time = current_time;
+
     if (write(s->fd, pkt->data, pkt->size) == -1)
         return AVERROR(errno);
     return 0;

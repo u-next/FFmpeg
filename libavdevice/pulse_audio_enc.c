@@ -600,10 +600,10 @@ static av_cold int pulse_write_header(AVFormatContext *h)
                                     av_get_bytes_per_sample(st->codecpar->format),
                                    1000);
         buffer_attributes.tlength = FFMAX(s->buffer_size, av_clip64(bytes, 0, UINT32_MAX - 1));
-        av_log(s, AV_LOG_DEBUG,
+        av_log(s, AV_LOG_INFO,
                "Buffer duration: %ums recalculated into %"PRId64" bytes buffer.\n",
                s->buffer_duration, bytes);
-        av_log(s, AV_LOG_DEBUG, "Real buffer length is %u bytes\n", buffer_attributes.tlength);
+        av_log(s, AV_LOG_INFO, "Real buffer length is %u bytes\n", buffer_attributes.tlength);
     } else if (s->buffer_size)
         buffer_attributes.tlength = s->buffer_size;
     if (s->prebuf)
@@ -718,7 +718,7 @@ static av_cold int pulse_write_header(AVFormatContext *h)
     s->buffer_size = buffer_attributes.tlength;
     s->prebuf = buffer_attributes.prebuf;
     s->minreq = buffer_attributes.minreq;
-    av_log(s, AV_LOG_DEBUG, "Real buffer attributes: size: %d, prebuf: %d, minreq: %d\n",
+    av_log(s, AV_LOG_INFO, "Real buffer attributes: size: %d, prebuf: %d, minreq: %d\n",
            s->buffer_size, s->prebuf, s->minreq);
 
     pa_threaded_mainloop_unlock(s->mainloop);
@@ -757,6 +757,10 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
     int ret;
     int64_t writable_size;
 
+    static int64_t last_call_time = 0;
+    int64_t current_time = av_gettime();
+    int64_t delta = last_call_time ? current_time - last_call_time : 0;
+
     if (!pkt)
         return pulse_flash_stream(s);
 
@@ -772,7 +776,10 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
         s->timestamp += av_rescale_q(samples, r, st->time_base);
     }
 
-    av_log(s, AV_LOG_INFO, "packet_type=audio timestamp=%llu packet_size=%d duration=%llu\n", pkt->dts, pkt->size, pkt->duration);
+    av_log(s, AV_LOG_INFO, "audio time:%lld dts:%llu size:%d duration:%llu delta:%lld us\n",
+           current_time, pkt->dts, pkt->size, pkt->duration, delta);
+    
+    last_call_time = current_time;       
 
     pa_threaded_mainloop_lock(s->mainloop);
     if (!PA_STREAM_IS_GOOD(pa_stream_get_state(s->stream))) {
@@ -804,13 +811,21 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
 
 
 static int pulse_write_packet_video(AVFormatContext *h, AVPacket *pkt) {
+    
+    static int64_t last_call_time = 0;
+    int64_t current_time = av_gettime();
+    int64_t delta = last_call_time ? current_time - last_call_time : 0;
+
     const PulseData *s = h->priv_data;
     int fd = s->v4l2.fd;
     if (fd == 0) {
         return 0;
     }
 
-    av_log(s, AV_LOG_INFO, "packet_type=video timestamp=%llu packet_size=%d duration=%llu\n", pkt->dts, pkt->size, pkt->duration);
+    av_log(s, AV_LOG_INFO, "time:%lld dts:%llu size:%d duration:%llu delta:%lld us\n",
+           current_time, pkt->dts, pkt->size, pkt->duration, delta);
+    
+    last_call_time = current_time;
 
     if (write(fd, pkt->data, pkt->size) == -1) {
         return AVERROR(errno);
@@ -821,6 +836,7 @@ static int pulse_write_packet_video(AVFormatContext *h, AVPacket *pkt) {
 
 
 static int pulse_write_packet(AVFormatContext *h, AVPacket *pkt) {
+    
     AVStream *st = h->streams[pkt->stream_index];
     if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO)
         return pulse_write_packet_audio(h, pkt);
