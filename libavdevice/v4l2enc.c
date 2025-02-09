@@ -24,11 +24,145 @@
 #include "libavformat/mux.h"
 #include "libavutil/time.h"
 #include "v4l2-common.h"
+#include <pthread.h>
+
+#define RING_BUFFER_SIZE 5
+#define MIN_FRAMES_TO_START 2
 
 typedef struct {
     AVClass *class;
     int fd;
+    
+    // Buffer management
+    AVPacket *ring_buffer[RING_BUFFER_SIZE];
+    int buffer_head;
+    int buffer_tail;
+    int buffer_count;
+    
+    // Thread management
+    pthread_t output_thread;
+    pthread_mutex_t buffer_lock;
+    pthread_cond_t buffer_cond;
+    int thread_running;
+    
+    // Timing management
+    int64_t frame_interval;
+    int64_t last_output_time;
 } V4L2Context;
+
+static void buffer_init(V4L2Context *ctx) {
+    memset(ctx->ring_buffer, 0, sizeof(ctx->ring_buffer));
+    ctx->buffer_head = 0;
+    ctx->buffer_tail = 0;
+    ctx->buffer_count = 0;
+    pthread_mutex_init(&ctx->buffer_lock, NULL);
+    pthread_cond_init(&ctx->buffer_cond, NULL);
+    ctx->thread_running = 0;
+    ctx->last_output_time = 0;
+}
+
+static void buffer_destroy(V4L2Context *ctx) {
+    pthread_mutex_lock(&ctx->buffer_lock);
+    for (int i = 0; i < RING_BUFFER_SIZE; i++) {
+        if (ctx->ring_buffer[i]) {
+            av_packet_free(&ctx->ring_buffer[i]);
+        }
+    }
+    pthread_mutex_unlock(&ctx->buffer_lock);
+    pthread_mutex_destroy(&ctx->buffer_lock);
+    pthread_cond_destroy(&ctx->buffer_cond);
+}
+
+static int buffer_push(V4L2Context *ctx, AVPacket *pkt) {
+    pthread_mutex_lock(&ctx->buffer_lock);
+    
+    if (ctx->buffer_count >= RING_BUFFER_SIZE) {
+        // Buffer is full, discard oldest frame
+        AVPacket *old_pkt = ctx->ring_buffer[ctx->buffer_tail];
+        if (old_pkt) {
+            av_packet_free(&old_pkt);
+        }
+        ctx->ring_buffer[ctx->buffer_tail] = NULL;
+        ctx->buffer_tail = (ctx->buffer_tail + 1) % RING_BUFFER_SIZE;
+        ctx->buffer_count--;
+        
+        av_log(ctx, AV_LOG_DEBUG, "Buffer full, discarding oldest frame\n");
+    }
+    
+    AVPacket *new_pkt = av_packet_alloc();
+    av_packet_ref(new_pkt, pkt);
+    
+    ctx->ring_buffer[ctx->buffer_head] = new_pkt;
+    ctx->buffer_head = (ctx->buffer_head + 1) % RING_BUFFER_SIZE;
+    ctx->buffer_count++;
+    
+    pthread_cond_signal(&ctx->buffer_cond);
+    pthread_mutex_unlock(&ctx->buffer_lock);
+    return 0;
+}
+
+static AVPacket* buffer_pop(V4L2Context *ctx) {
+    pthread_mutex_lock(&ctx->buffer_lock);
+    
+    while (ctx->thread_running && ctx->buffer_count == 0) {
+        pthread_cond_wait(&ctx->buffer_cond, &ctx->buffer_lock);
+    }
+    
+    if (!ctx->thread_running) {
+        pthread_mutex_unlock(&ctx->buffer_lock);
+        return NULL;
+    }
+    
+    AVPacket *pkt = ctx->ring_buffer[ctx->buffer_tail];
+    ctx->ring_buffer[ctx->buffer_tail] = NULL;
+    ctx->buffer_tail = (ctx->buffer_tail + 1) % RING_BUFFER_SIZE;
+    ctx->buffer_count--;
+    
+    pthread_mutex_unlock(&ctx->buffer_lock);
+    return pkt;
+}
+
+static void *output_thread_func(void *arg) {
+    V4L2Context *ctx = arg;
+    int64_t next_frame_time = 0;
+    
+    // Wait for initial buffer fill
+    pthread_mutex_lock(&ctx->buffer_lock);
+    while (ctx->thread_running && ctx->buffer_count < MIN_FRAMES_TO_START) {
+        pthread_cond_wait(&ctx->buffer_cond, &ctx->buffer_lock);
+    }
+    pthread_mutex_unlock(&ctx->buffer_lock);
+    
+    while (ctx->thread_running) {
+        int64_t current_time = av_gettime();
+        
+        if (next_frame_time == 0) {
+            next_frame_time = current_time;
+        }
+        
+        if (current_time >= next_frame_time) {
+            AVPacket *pkt = buffer_pop(ctx);
+            if (pkt) {
+                
+                if (write(ctx->fd, pkt->data, pkt->size) == -1) {
+                    av_log(ctx, AV_LOG_ERROR, "Failed to write frame: %s\n", av_err2str(AVERROR(errno)));
+                }
+                av_packet_free(&pkt);
+                next_frame_time += ctx->frame_interval;
+                ctx->last_output_time = current_time;
+            } else if (ctx->thread_running) {
+                // Buffer underrun - retry at half interval
+                av_log(ctx, AV_LOG_WARNING, "Buffer underrun detected, retrying in %"PRId64" us\n", ctx->frame_interval / 2);
+                next_frame_time = current_time + (ctx->frame_interval / 2);
+            }
+        } else {
+            // Sleep for 1ms time to avoid busy waiting
+            av_usleep(1000);
+        }
+    }
+    
+    return NULL;
+}
 
 static av_cold int write_header(AVFormatContext *s1)
 {
@@ -89,30 +223,45 @@ static av_cold int write_header(AVFormatContext *s1)
     }
 
     av_log(s1, AV_LOG_INFO, "Frame rate: %d/%d\n", s1->streams[0]->time_base.num, s1->streams[0]->time_base.den);
+    
+    // Calculate frame interval in microseconds
+    s->frame_interval = (int64_t)s1->streams[0]->time_base.num * 1000000LL / s1->streams[0]->time_base.den;
+    av_log(s1, AV_LOG_INFO, "Frame interval: %"PRId64" us\n", s->frame_interval);
+    
+    // Initialize buffer and start thread
+    buffer_init(s);
+    s->thread_running = 1;
+    if (pthread_create(&s->output_thread, NULL, output_thread_func, s) != 0) {
+        res = AVERROR(errno);
+        av_log(s1, AV_LOG_ERROR, "Failed to create output thread\n");
+        return res;
+    }
 
     return res;
 }
 
 static int write_packet(AVFormatContext *s1, AVPacket *pkt)
 {
-    const V4L2Context *s = s1->priv_data;
-    static int64_t last_call_time = 0;
+    V4L2Context *s = s1->priv_data;
     int64_t current_time = av_gettime();
-    int64_t delta = last_call_time ? current_time - last_call_time : 0;
-
-    av_log(s, AV_LOG_INFO, "time:%lld dts:%llu size:%d duration:%llu delta:%lld us\n",
-           current_time, pkt->dts, pkt->size, pkt->duration, delta);
     
-    last_call_time = current_time;
-
-    if (write(s->fd, pkt->data, pkt->size) == -1)
-        return AVERROR(errno);
-    return 0;
+    av_log(s, AV_LOG_DEBUG, "time:%"PRId64" dts:%"PRId64" size:%d duration:%"PRId64"\n",
+           current_time, pkt->dts, pkt->size, pkt->duration);
+    
+    return buffer_push(s, pkt);
 }
 
 static int write_trailer(AVFormatContext *s1)
 {
-    const V4L2Context *s = s1->priv_data;
+    V4L2Context *s = s1->priv_data;
+    
+    // Stop thread
+    s->thread_running = 0;
+    pthread_cond_signal(&s->buffer_cond);
+    pthread_join(s->output_thread, NULL);
+    
+    // Cleanup
+    buffer_destroy(s);
     close(s->fd);
     return 0;
 }
