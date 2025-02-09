@@ -27,7 +27,7 @@
 #include <pthread.h>
 
 #define RING_BUFFER_SIZE 5
-#define MIN_FRAMES_TO_START 2
+#define MIN_FRAMES_TO_START 3
 
 typedef struct {
     AVClass *class;
@@ -86,7 +86,7 @@ static int buffer_push(V4L2Context *ctx, AVPacket *pkt) {
         ctx->buffer_tail = (ctx->buffer_tail + 1) % RING_BUFFER_SIZE;
         ctx->buffer_count--;
         
-        av_log(ctx, AV_LOG_DEBUG, "Buffer full, discarding oldest frame\n");
+        av_log(ctx, AV_LOG_WARNING, "Buffer full, discarding oldest frame\n");
     }
     
     AVPacket *new_pkt = av_packet_alloc();
@@ -143,22 +143,29 @@ static void *output_thread_func(void *arg) {
         if (current_time >= next_frame_time) {
             AVPacket *pkt = buffer_pop(ctx);
             if (pkt) {
+                int64_t time_delta = ctx->last_output_time ? current_time - ctx->last_output_time : 0;
                 if (write(ctx->fd, pkt->data, pkt->size) == -1) {
                     av_log(ctx, AV_LOG_ERROR, "Failed to write frame: %s\n", av_err2str(AVERROR(errno)));
                 }
                 av_packet_free(&pkt);
-                av_log(ctx, AV_LOG_DEBUG, "frame writtern to device, buffer level: %d/%d\n", 
-                       ctx->buffer_count, RING_BUFFER_SIZE);
+                av_log(ctx, AV_LOG_VERBOSE, "frame written to device, buffer level: %d/%d, time delta: %"PRId64" us\n", 
+                       ctx->buffer_count, RING_BUFFER_SIZE, time_delta);
                 next_frame_time += ctx->frame_interval;
                 ctx->last_output_time = current_time;
             } else if (ctx->thread_running) {
-                // Buffer underrun - retry at half interval
+                // Buffer underrun
                 av_log(ctx, AV_LOG_WARNING, "Buffer underrun detected, retrying in %"PRId64" us\n", ctx->frame_interval / 2);
                 next_frame_time = current_time + (ctx->frame_interval / 2);
             }
         } else {
-            // Sleep for 1ms time to avoid busy waiting
-            av_usleep(1000);
+            // sleep and wake up 3ms earlier then make short snoozes
+            int64_t sleep_time = next_frame_time - current_time;
+            if (sleep_time > 3000) {
+                av_usleep(sleep_time - 3000); // Wake up 1ms early to account for scheduling
+            }
+            else {
+                av_usleep(300);
+            }
         }
     }
     
