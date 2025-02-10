@@ -39,6 +39,7 @@ typedef struct {
     int buffer_head;
     int buffer_tail;
     int buffer_count;
+    AVPacket *last_frame;  // Store last frame for underrun
     
     // Thread management
     pthread_t output_thread;
@@ -56,6 +57,7 @@ static void buffer_init(V4L2Context *ctx) {
     ctx->buffer_head = 0;
     ctx->buffer_tail = 0;
     ctx->buffer_count = 0;
+    ctx->last_frame = NULL;
     pthread_mutex_init(&ctx->buffer_lock, NULL);
     pthread_cond_init(&ctx->buffer_cond, NULL);
     ctx->thread_running = 0;
@@ -68,6 +70,9 @@ static void buffer_destroy(V4L2Context *ctx) {
         if (ctx->ring_buffer[i]) {
             av_packet_free(&ctx->ring_buffer[i]);
         }
+    }
+    if (ctx->last_frame) {
+        av_packet_free(&ctx->last_frame);
     }
     pthread_mutex_unlock(&ctx->buffer_lock);
     pthread_mutex_destroy(&ctx->buffer_lock);
@@ -119,6 +124,14 @@ static AVPacket* buffer_pop(V4L2Context *ctx) {
     return pkt;
 }
 
+static void update_last_frame(V4L2Context *ctx, const AVPacket *pkt) {
+    if (ctx->last_frame) {
+        av_packet_free(&ctx->last_frame);
+    }
+    ctx->last_frame = av_packet_alloc();
+    av_packet_ref(ctx->last_frame, pkt);
+}
+
 static void *output_thread_func(void *arg) {
     V4L2Context *ctx = arg;
     int64_t next_frame_time = 0;
@@ -144,21 +157,32 @@ static void *output_thread_func(void *arg) {
                 if (write(ctx->fd, pkt->data, pkt->size) == -1) {
                     av_log(ctx, AV_LOG_ERROR, "Failed to write frame: %s\n", av_err2str(AVERROR(errno)));
                 }
+                update_last_frame(ctx, pkt);
                 av_packet_free(&pkt);
                 av_log(ctx, AV_LOG_VERBOSE, "frame written to device, buffer level: %d/%d, time delta: %"PRId64" us\n", 
                        ctx->buffer_count, RING_BUFFER_SIZE, time_delta);
                 next_frame_time += ctx->frame_interval;
                 ctx->last_output_time = current_time;
             } else if (ctx->thread_running) {
-                // Buffer underrun
-                av_log(ctx, AV_LOG_WARNING, "Buffer underrun detected, retrying in %"PRId64" us\n", ctx->frame_interval / 2);
-                next_frame_time = current_time + (ctx->frame_interval / 2);
+                // Buffer underrun - try to output last frame again
+                if (ctx->last_frame) {
+                    if (write(ctx->fd, ctx->last_frame->data, ctx->last_frame->size) == -1) {
+                        av_log(ctx, AV_LOG_ERROR, "Failed to write last frame: %s\n", av_err2str(AVERROR(errno)));
+                    }
+                    av_log(ctx, AV_LOG_WARNING, "Buffer underrun, outputting last frame at %"PRId64" us\n", current_time);
+                    next_frame_time += ctx->frame_interval;
+                    ctx->last_output_time = current_time;
+                } else {
+                    // No last frame available, wait half interval
+                    av_log(ctx, AV_LOG_WARNING, "Buffer underrun with no last frame, retrying in %"PRId64" us\n", ctx->frame_interval / 2);
+                    next_frame_time = current_time + (ctx->frame_interval / 2);
+                }
             }
         } else {
             // sleep and wake up 2ms earlier then make short snoozes
             int64_t sleep_time = next_frame_time - current_time;
             if (sleep_time > 2000) {
-                av_usleep(sleep_time - 2000); // Wake up 1ms early to account for scheduling
+                av_usleep(sleep_time - 2000); // Wake up 2ms early to account for scheduling
             }
             else {
                 av_usleep(200);
