@@ -25,6 +25,7 @@
 #include "libavutil/time.h"
 #include "v4l2-common.h"
 #include <pthread.h>
+#include <sched.h>
 
 #define RING_BUFFER_SIZE 5
 #define MIN_FRAMES_TO_START 3
@@ -104,11 +105,7 @@ static int buffer_push(V4L2Context *ctx, AVPacket *pkt) {
 static AVPacket* buffer_pop(V4L2Context *ctx) {
     pthread_mutex_lock(&ctx->buffer_lock);
     
-    while (ctx->thread_running && ctx->buffer_count == 0) {
-        pthread_cond_wait(&ctx->buffer_cond, &ctx->buffer_lock);
-    }
-    
-    if (!ctx->thread_running) {
+    if (!ctx->thread_running || ctx->buffer_count == 0) {
         pthread_mutex_unlock(&ctx->buffer_lock);
         return NULL;
     }
@@ -158,13 +155,13 @@ static void *output_thread_func(void *arg) {
                 next_frame_time = current_time + (ctx->frame_interval / 2);
             }
         } else {
-            // sleep and wake up 3ms earlier then make short snoozes
+            // sleep and wake up 2ms earlier then make short snoozes
             int64_t sleep_time = next_frame_time - current_time;
-            if (sleep_time > 3000) {
-                av_usleep(sleep_time - 3000); // Wake up 1ms early to account for scheduling
+            if (sleep_time > 2000) {
+                av_usleep(sleep_time - 2000); // Wake up 1ms early to account for scheduling
             }
             else {
-                av_usleep(300);
+                av_usleep(200);
             }
         }
     }
@@ -239,11 +236,16 @@ static av_cold int write_header(AVFormatContext *s1)
     // Initialize buffer and start thread
     buffer_init(s);
     s->thread_running = 1;
+
     if (pthread_create(&s->output_thread, NULL, output_thread_func, s) != 0) {
         res = AVERROR(errno);
         av_log(s1, AV_LOG_ERROR, "Failed to create output thread\n");
         return res;
     }
+
+    // Try to set higher priority using nice value
+    pthread_setschedprio(s->output_thread, -10);
+    av_log(s1, AV_LOG_INFO, "Output thread created with elevated priority\n");
 
     return res;
 }
