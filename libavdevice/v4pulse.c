@@ -200,11 +200,11 @@ static void *output_thread_func(void *arg) {
             if (pkt) {
                 // if we have exceeded sync by more than 2 frames, output the last frame and do not consume frames.
                 if ((pkt->pts * ctx->audio_pts_roc) > (ctx->last_audio_pts + (ctx->audio_pts_roc*2))) {
+                    av_log(ctx, AV_LOG_WARNING, ">2 frames forward desync detected; outputting last frame at %"PRId64" us\n", current_time);
                     if (write(v4l2.fd, ctx->last_frame->data, ctx->last_frame->size) == -1) {
                         av_log(ctx, AV_LOG_ERROR, "Failed to write last frame: %s\n", av_err2str(AVERROR(errno)));
                         continue;
-                    }
-                    av_log(ctx, AV_LOG_WARNING, ">2 frames forward desync detected; outputting last frame at %"PRId64" us\n", current_time);
+                    }                    
                 }
 
                 int64_t time_delta = ctx->last_output_time ? current_time - ctx->last_output_time : 0;
