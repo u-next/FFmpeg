@@ -37,8 +37,14 @@
 #include "libavutil/attributes.h"
 #include "pulse_audio_common.h"
 #include "v4l2-common.h"
+#include "libavutil/time.h"
 #include "libavutil/imgutils.h"
 #include "libavutil/pixdesc.h"
+#include <pthread.h>
+#include <sched.h>
+
+#define RING_BUFFER_SIZE 5
+#define MIN_FRAMES_TO_START 3
 
 typedef struct {
     AVClass *class;
@@ -65,7 +71,166 @@ typedef struct PulseData {
     pa_volume_t base_volume;
     pa_volume_t last_volume;
     V4L2Context v4l2; // ridiculous hack, who PAYS me to commit such heinous crimes
+
+    // Buffer management
+    AVPacket *ring_buffer[RING_BUFFER_SIZE];
+    int buffer_head;
+    int buffer_tail;
+    int buffer_count;
+    AVPacket *last_frame;  // Store last frame for underrun
+
+    // Thread management
+    pthread_t output_thread;
+    pthread_mutex_t buffer_lock;
+    pthread_cond_t buffer_cond;
+    int thread_running;
+
+    // Timing management
+    int64_t frame_interval;
+    int64_t last_output_time;
 } PulseData;
+
+static void buffer_init(PulseData *ctx) {
+    memset(ctx->ring_buffer, 0, sizeof(ctx->ring_buffer));
+    ctx->buffer_head = 0;
+    ctx->buffer_tail = 0;
+    ctx->buffer_count = 0;
+    ctx->last_frame = NULL;
+    pthread_mutex_init(&ctx->buffer_lock, NULL);
+    pthread_cond_init(&ctx->buffer_cond, NULL);
+    ctx->thread_running = 0;
+    ctx->last_output_time = 0;
+}
+
+static void buffer_destroy(PulseData *ctx) {
+    pthread_mutex_lock(&ctx->buffer_lock);
+    for (int i = 0; i < RING_BUFFER_SIZE; i++) {
+        if (ctx->ring_buffer[i]) {
+            av_packet_free(&ctx->ring_buffer[i]);
+        }
+    }
+    if (ctx->last_frame) {
+        av_packet_free(&ctx->last_frame);
+    }
+    pthread_mutex_unlock(&ctx->buffer_lock);
+    pthread_mutex_destroy(&ctx->buffer_lock);
+    pthread_cond_destroy(&ctx->buffer_cond);
+}
+
+static int buffer_push(PulseData *ctx, AVPacket *pkt) {
+    pthread_mutex_lock(&ctx->buffer_lock);
+
+    if (ctx->buffer_count >= RING_BUFFER_SIZE) {
+        // Buffer is full, discard oldest frame
+        AVPacket *old_pkt = ctx->ring_buffer[ctx->buffer_tail];
+        if (old_pkt) {
+            av_packet_free(&old_pkt);
+        }
+        ctx->ring_buffer[ctx->buffer_tail] = NULL;
+        ctx->buffer_tail = (ctx->buffer_tail + 1) % RING_BUFFER_SIZE;
+        ctx->buffer_count--;
+
+        av_log(ctx, AV_LOG_WARNING, "Buffer full, discarding oldest frame\n");
+    }
+
+    AVPacket *new_pkt = av_packet_alloc();
+    av_packet_ref(new_pkt, pkt);
+
+    ctx->ring_buffer[ctx->buffer_head] = new_pkt;
+    ctx->buffer_head = (ctx->buffer_head + 1) % RING_BUFFER_SIZE;
+    ctx->buffer_count++;
+
+    pthread_cond_signal(&ctx->buffer_cond);
+    pthread_mutex_unlock(&ctx->buffer_lock);
+    return 0;
+}
+
+static AVPacket* buffer_pop(PulseData *ctx) {
+    pthread_mutex_lock(&ctx->buffer_lock);
+
+    if (!ctx->thread_running || ctx->buffer_count == 0) {
+        pthread_mutex_unlock(&ctx->buffer_lock);
+        return NULL;
+    }
+
+    AVPacket *pkt = ctx->ring_buffer[ctx->buffer_tail];
+    ctx->ring_buffer[ctx->buffer_tail] = NULL;
+    ctx->buffer_tail = (ctx->buffer_tail + 1) % RING_BUFFER_SIZE;
+    ctx->buffer_count--;
+
+    pthread_mutex_unlock(&ctx->buffer_lock);
+    return pkt;
+}
+
+static void update_last_frame(PulseData *ctx, const AVPacket *pkt) {
+    if (ctx->last_frame) {
+        av_packet_free(&ctx->last_frame);
+    }
+    ctx->last_frame = av_packet_alloc();
+    av_packet_ref(ctx->last_frame, pkt);
+}
+
+static void *output_thread_func(void *arg) {
+    PulseData *ctx = arg;
+    V4L2Context v4l2 = ctx->v4l2;
+    int64_t next_frame_time = 0;
+
+    // Wait for initial buffer fill
+    pthread_mutex_lock(&ctx->buffer_lock);
+    while (ctx->thread_running && ctx->buffer_count < MIN_FRAMES_TO_START) {
+        pthread_cond_wait(&ctx->buffer_cond, &ctx->buffer_lock);
+    }
+    pthread_mutex_unlock(&ctx->buffer_lock);
+
+    while (ctx->thread_running) {
+        int64_t current_time = av_gettime();
+
+        if (next_frame_time == 0) {
+            next_frame_time = current_time;
+        }
+
+        if (current_time >= next_frame_time) {
+            AVPacket *pkt = buffer_pop(ctx);
+            if (pkt) {
+                int64_t time_delta = ctx->last_output_time ? current_time - ctx->last_output_time : 0;
+                if (write(v4l2.fd, pkt->data, pkt->size) == -1) {
+                    av_log(ctx, AV_LOG_ERROR, "Failed to write frame: %s\n", av_err2str(AVERROR(errno)));
+                }
+                update_last_frame(ctx, pkt);
+                av_packet_free(&pkt);
+                av_log(ctx, AV_LOG_VERBOSE, "frame written to device, buffer level: %d/%d, time delta: %"PRId64" us\n", 
+                       ctx->buffer_count, RING_BUFFER_SIZE, time_delta);
+                next_frame_time += ctx->frame_interval;
+                ctx->last_output_time = current_time;
+            } else if (ctx->thread_running) {
+                // Buffer underrun - try to output last frame again
+                if (ctx->last_frame) {
+                    if (write(v4l2.fd, ctx->last_frame->data, ctx->last_frame->size) == -1) {
+                        av_log(ctx, AV_LOG_ERROR, "Failed to write last frame: %s\n", av_err2str(AVERROR(errno)));
+                    }
+                    av_log(ctx, AV_LOG_WARNING, "Buffer underrun, outputting last frame at %"PRId64" us\n", current_time);
+                    next_frame_time += ctx->frame_interval;
+                    ctx->last_output_time = current_time;
+                } else {
+                    // No last frame available, wait half interval
+                    av_log(ctx, AV_LOG_WARNING, "Buffer underrun with no last frame, retrying in %"PRId64" us\n", ctx->frame_interval / 2);
+                    next_frame_time = current_time + (ctx->frame_interval / 2);
+                }
+            }
+        } else {
+            // sleep and wake up 2ms earlier then make short snoozes
+            int64_t sleep_time = next_frame_time - current_time;
+            if (sleep_time > 2000) {
+                av_usleep(sleep_time - 2000); // Wake up 2ms early to account for scheduling
+            }
+            else {
+                av_usleep(200);
+            }
+        }
+    }
+
+    return NULL;
+}
 
 static inline int get_stream_index(AVFormatContext *h, enum AVMediaType type) {
     int res_ix = -1;
@@ -78,13 +243,15 @@ static inline int get_stream_index(AVFormatContext *h, enum AVMediaType type) {
     return res_ix;
 }
 
-static av_cold int write_header_v4l2(AVFormatContext *s1, V4L2Context *s) {
+static av_cold int write_header_v4l2(AVFormatContext *s1, PulseData *s2) {
     int res = 0, flags = O_RDWR;
     struct v4l2_format fmt = {
         .type = V4L2_BUF_TYPE_VIDEO_OUTPUT
     };
     AVCodecParameters *par;
     uint32_t v4l2_pixfmt;
+
+    V4L2Context *s = &(s2->v4l2);
 
     int stream_ix = get_stream_index(s1, AVMEDIA_TYPE_VIDEO);
     if (stream_ix == -1) {
@@ -102,31 +269,19 @@ static av_cold int write_header_v4l2(AVFormatContext *s1, V4L2Context *s) {
         return res;
     }
 
-    /* if (s1->nb_streams != 1 || */
-    /*     s1->streams[0]->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) { */
-    /*     av_log(s1, AV_LOG_ERROR, */
-    /*            "V4L2 output device supports only a single raw video stream\n"); */
-    /*     return AVERROR(EINVAL); */
-    /* } */
-
-
     par = s1->streams[stream_ix]->codecpar;
 
-    /* if(par->codec_id == AV_CODEC_ID_RAWVIDEO) { */
-    /*     v4l2_pixfmt = ff_fmt_ff2v4l(par->format, AV_CODEC_ID_RAWVIDEO); */
-    /* } else { */
-    /*     v4l2_pixfmt = ff_fmt_ff2v4l(AV_PIX_FMT_NONE, par->codec_id); */
-    /* } */
+    if(par->codec_id == AV_CODEC_ID_RAWVIDEO) {
+        v4l2_pixfmt = ff_fmt_ff2v4l(par->format, AV_CODEC_ID_RAWVIDEO);
+    } else {
+        v4l2_pixfmt = ff_fmt_ff2v4l(AV_PIX_FMT_NONE, par->codec_id);
+    }
 
-    v4l2_pixfmt = AV_PIX_FMT_YUV420P;
-
-    /* if (!v4l2_pixfmt) { // XXX: try to force them one by one? */
-    /*     av_log(s1, AV_LOG_ERROR, "Unknown V4L2 pixel format equivalent for %s\n", */
-    /*            av_get_pix_fmt_name(par->format)); */
-    /*     return AVERROR(EINVAL); */
-    /* } */
-
-    /* av_log(s1, AV_LOG_WARNING, "Using pixfmt %s\n", av_get_pix_fmt_name(par->format)); */
+    if (!v4l2_pixfmt) { // XXX: try to force them one by one?
+        av_log(s1, AV_LOG_ERROR, "Unknown V4L2 pixel format equivalent for %s\n",
+               av_get_pix_fmt_name(par->format));
+        return AVERROR(EINVAL);
+    }
 
     if (ioctl(s->fd, VIDIOC_G_FMT, &fmt) < 0) {
         res = AVERROR(errno);
@@ -144,6 +299,26 @@ static av_cold int write_header_v4l2(AVFormatContext *s1, V4L2Context *s) {
         av_log(s1, AV_LOG_ERROR, "ioctl(VIDIOC_S_FMT): %s\n", av_err2str(res));
         return res;
     }
+
+       av_log(s1, AV_LOG_INFO, "Frame rate: %d/%d\n", s1->streams[0]->time_base.num, s1->streams[0]->time_base.den);
+
+    // Calculate frame interval in microseconds
+    s2->frame_interval = (int64_t)s1->streams[0]->time_base.num * 1000000LL / s1->streams[0]->time_base.den;
+    av_log(s1, AV_LOG_INFO, "Frame interval: %"PRId64" us\n", s2->frame_interval);
+
+    // Initialize buffer and start thread
+    buffer_init(s2);
+    s2->thread_running = 1;
+
+    if (pthread_create(&s2->output_thread, NULL, output_thread_func, s2) != 0) {
+        res = AVERROR(errno);
+        av_log(s1, AV_LOG_ERROR, "Failed to create output thread\n");
+        return res;
+    }
+
+    // Try to set higher priority using nice value
+    pthread_setschedprio(s2->output_thread, -10);
+    av_log(s1, AV_LOG_INFO, "Output thread created with elevated priority\n");
 
     return res;
 }
@@ -540,6 +715,14 @@ static int write_trailer_video(AVFormatContext *s1)
     PulseData *handle = s1->priv_data;
     V4L2Context s = handle->v4l2;
     close(s.fd);
+
+    // Stop thread
+    handle->thread_running = 0;
+    pthread_cond_signal(&handle->buffer_cond);
+    pthread_join(handle->output_thread, NULL);
+
+    // Cleanup
+    buffer_destroy(handle);
     return 0;
 }
 
@@ -571,7 +754,7 @@ static av_cold int pulse_write_header(AVFormatContext *h)
                                                   PA_STREAM_NOT_MONOTONIC;
 
     
-    int v4l2_res = write_header_v4l2(h, &s->v4l2);
+    int v4l2_res = write_header_v4l2(h, s);
     if (v4l2_res < 0) {
         av_log(s, AV_LOG_ERROR, "Failed to initialize v4l2 in pulse output");
         return AVERROR(ret);
@@ -772,8 +955,6 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
         s->timestamp += av_rescale_q(samples, r, st->time_base);
     }
 
-    av_log(s, AV_LOG_INFO, "packet_type=audio timestamp=%llu packet_size=%d duration=%llu\n", pkt->dts, pkt->size, pkt->duration);
-
     pa_threaded_mainloop_lock(s->mainloop);
     if (!PA_STREAM_IS_GOOD(pa_stream_get_state(s->stream))) {
         av_log(s, AV_LOG_ERROR, "PulseAudio stream is in invalid state.\n");
@@ -804,17 +985,13 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
 
 
 static int pulse_write_packet_video(AVFormatContext *h, AVPacket *pkt) {
-    const PulseData *s = h->priv_data;
-    int fd = s->v4l2.fd;
-    if (fd == 0) {
-        return 0;
-    }
+    PulseData *s = h->priv_data;
+    int64_t current_time = av_gettime();
 
-    av_log(s, AV_LOG_INFO, "packet_type=video timestamp=%llu packet_size=%d duration=%llu\n", pkt->dts, pkt->size, pkt->duration);
+    av_log(s, AV_LOG_DEBUG, "time:%"PRId64" dts:%"PRId64" size:%d duration:%"PRId64"\n",
+           current_time, pkt->dts, pkt->size, pkt->duration);
 
-    if (write(fd, pkt->data, pkt->size) == -1) {
-        return AVERROR(errno);
-    }
+    return buffer_push(s, pkt);
 
     return 0;
 }
