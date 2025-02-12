@@ -84,6 +84,7 @@ typedef struct PulseData {
     int64_t audio_pts_roc; // temporary
     int64_t roc_accum; // rolling average of rate of change for audio timestamps
     int64_t roc_counter;
+    int64_t base_audio_pts; // need to account for base value being wrong fundamentally
 
     // Thread management
     pthread_t output_thread;
@@ -199,12 +200,19 @@ static void *output_thread_func(void *arg) {
             AVPacket *pkt = buffer_pop(ctx);
             if (pkt) {
                 // if we have exceeded sync by more than 2 frames, output the last frame and do not consume frames.
-                if ((pkt->pts * ctx->audio_pts_roc) > (ctx->last_audio_pts + (ctx->audio_pts_roc*2))) {
+                if (((pkt->pts * ctx->audio_pts_roc) + ctx->base_audio_pts) > (ctx->last_audio_pts + (ctx->audio_pts_roc*2))) {
                     av_log(ctx, AV_LOG_WARNING, ">2 frames forward desync detected; outputting last frame at %"PRId64" us\n", current_time);
                     if (write(v4l2.fd, ctx->last_frame->data, ctx->last_frame->size) == -1) {
                         av_log(ctx, AV_LOG_ERROR, "Failed to write last frame: %s\n", av_err2str(AVERROR(errno)));
                         continue;
-                    }                    
+                    }
+                }
+
+                // if the audio is more than 2 frames ahead of video, we want to wait half an interval
+                if (((pkt->pts * ctx->audio_pts_roc) + (ctx->audio_pts_roc*2) + ctx->base_audio_pts) < ctx->last_audio_pts) {
+                    av_log(ctx, AV_LOG_WARNING, ">2 frames backward desync detected; outputting last frame at %"PRId64" us\n", current_time);
+                    // throw away video
+                    continue;
                 }
 
                 int64_t time_delta = ctx->last_output_time ? current_time - ctx->last_output_time : 0;
@@ -817,6 +825,8 @@ static av_cold int pulse_write_header(AVFormatContext *h)
     /*     return AVERROR(EINVAL); */
     /* } */
 
+    s->base_audio_pts = 0;
+
     if (sample_spec.channels == 1) {
         channel_map.channels = 1;
         channel_map.map[0] = PA_CHANNEL_POSITION_MONO;
@@ -970,6 +980,10 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
         s->timestamp += av_rescale_q(samples, r, st->time_base);
     }
 
+    if (s->base_audio_pts == 0) {
+        s->base_audio_pts = pkt->pts;
+    }
+    
     // store the last pts so that we can check sync with video.
     s->audio_pts_roc = pkt->pts - s->last_audio_pts;
     s->last_audio_pts = pkt->pts;
