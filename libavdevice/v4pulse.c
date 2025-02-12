@@ -198,24 +198,22 @@ static void *output_thread_func(void *arg) {
         if (current_time >= next_frame_time) {
             AVPacket *pkt = buffer_pop(ctx);
             if (pkt) {
-                // if we have exceeded sync by more than 2 frames, output the last frame and do not consume frames.
-                if ((pkt->pts * ctx->audio_pts_roc) > (ctx->last_audio_pts + (ctx->audio_pts_roc*2))) {
-                    av_log(ctx, AV_LOG_WARNING, ">2 frames forward desync detected; outputting last frame at %"PRId64" us\n", current_time);
-                    if (write(v4l2.fd, ctx->last_frame->data, ctx->last_frame->size) == -1) {
-                        av_log(ctx, AV_LOG_ERROR, "Failed to write last frame: %s\n", av_err2str(AVERROR(errno)));
-                        continue;
-                    }                    
-                }
-
                 int64_t time_delta = ctx->last_output_time ? current_time - ctx->last_output_time : 0;
                 if (write(v4l2.fd, pkt->data, pkt->size) == -1) {
                     av_log(ctx, AV_LOG_ERROR, "Failed to write frame: %s\n", av_err2str(AVERROR(errno)));
                 }
                 update_last_frame(ctx, pkt);
+                av_log(ctx, AV_LOG_VERBOSE, "frame written to device, buffer level: %d/%d, time delta: %"PRId64" us, pts=%"PRId64", apts=%"PRId64"\n", 
+                       ctx->buffer_count, RING_BUFFER_SIZE, time_delta, pkt->pts, ctx->last_audio_pts);
+                // if we have exceeded sync by more than 2 frames, wait longer before outputing the next frame
+                if ((pkt->pts * ctx->frame_interval) > (ctx->last_audio_pts + ctx->frame_interval)) {
+                    av_log(ctx, AV_LOG_WARNING, ">2 frames forward desync detected; wait twice longer at %"PRId64" us\n", current_time);  
+                    next_frame_time += ctx->frame_interval*2;              
+                }
+                else {
+                    next_frame_time += ctx->frame_interval;
+                }
                 av_packet_free(&pkt);
-                av_log(ctx, AV_LOG_VERBOSE, "frame written to device, buffer level: %d/%d, time delta: %"PRId64" us\n", 
-                       ctx->buffer_count, RING_BUFFER_SIZE, time_delta);
-                next_frame_time += ctx->frame_interval;
                 ctx->last_output_time = current_time;
             } else if (ctx->thread_running) {
                 // Buffer underrun - try to output last frame again
