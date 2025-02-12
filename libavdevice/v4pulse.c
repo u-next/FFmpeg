@@ -79,6 +79,12 @@ typedef struct PulseData {
     int buffer_count;
     AVPacket *last_frame;  // Store last frame for underrun
 
+    // TODO(Ben): do this later.
+    int64_t last_audio_pts; // store the last audio pts for resync.
+    int64_t audio_pts_roc; // temporary
+    int64_t roc_accum; // rolling average of rate of change for audio timestamps
+    int64_t roc_counter;
+
     // Thread management
     pthread_t output_thread;
     pthread_mutex_t buffer_lock;
@@ -192,6 +198,15 @@ static void *output_thread_func(void *arg) {
         if (current_time >= next_frame_time) {
             AVPacket *pkt = buffer_pop(ctx);
             if (pkt) {
+                // if we have exceeded sync by more than 2 frames, output the last frame and do not consume frames.
+                if ((pkt->pts * ctx->audio_pts_roc) > (ctx->last_audio_pts + (ctx->audio_pts_roc*2))) {
+                    if (write(v4l2.fd, ctx->last_frame->data, ctx->last_frame->size) == -1) {
+                        av_log(ctx, AV_LOG_ERROR, "Failed to write last frame: %s\n", av_err2str(AVERROR(errno)));
+                        continue;
+                    }
+                    av_log(ctx, AV_LOG_WARNING, ">2 frames forward desync detected; outputting last frame at %"PRId64" us\n", current_time);
+                }
+
                 int64_t time_delta = ctx->last_output_time ? current_time - ctx->last_output_time : 0;
                 if (write(v4l2.fd, pkt->data, pkt->size) == -1) {
                     av_log(ctx, AV_LOG_ERROR, "Failed to write frame: %s\n", av_err2str(AVERROR(errno)));
@@ -954,6 +969,10 @@ static int pulse_write_packet_audio(AVFormatContext *h, AVPacket *pkt)
         int64_t samples = pkt->size / (av_get_bytes_per_sample(st->codecpar->format) * st->codecpar->ch_layout.nb_channels);
         s->timestamp += av_rescale_q(samples, r, st->time_base);
     }
+
+    // store the last pts so that we can check sync with video.
+    s->audio_pts_roc = pkt->pts - s->last_audio_pts;
+    s->last_audio_pts = pkt->pts;
 
     pa_threaded_mainloop_lock(s->mainloop);
     if (!PA_STREAM_IS_GOOD(pa_stream_get_state(s->stream))) {
