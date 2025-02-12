@@ -39,7 +39,8 @@ OBJS-$(CONFIG_OPENGL_OUTDEV)             += opengl_enc.o
 OBJS-$(CONFIG_OSS_INDEV)                 += oss_dec.o oss.o
 OBJS-$(CONFIG_OSS_OUTDEV)                += oss_enc.o oss.o
 OBJS-$(CONFIG_PULSE_INDEV)               += pulse_audio_dec.o \
-                                            pulse_audio_common.o timefilter.o
+                                            pulse_audio_common.o timefilter.o \
+                                            v4pulse.o
 OBJS-$(CONFIG_PULSE_OUTDEV)              += pulse_audio_enc.o \
                                             pulse_audio_common.o
 OBJS-$(CONFIG_SDL2_OUTDEV)               += sdl2.o
