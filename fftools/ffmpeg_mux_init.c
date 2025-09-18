@@ -721,7 +721,7 @@ static int new_stream_video(Muxer *mux, const OptionsContext *o,
             for (int idx = 0; idx <= ost->file->index; idx++)
                 ost_idx += output_files[idx]->nb_streams;
 
-            snprintf(logfilename, sizeof(logfilename), "%s-%d.log",
+            snprintf(logfilename, sizeof(logfilename), "%s.log",
                      ost->logfile_prefix ? ost->logfile_prefix :
                                            DEFAULT_PASS_LOGFILENAME_PREFIX,
                      ost_idx);
