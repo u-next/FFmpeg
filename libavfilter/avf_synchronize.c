@@ -41,7 +41,7 @@ static int process_command(AVFilterContext *ctx, const char *cmd, const char *ar
 }
 
 const FFFilter ff_avf_synchronize = {
-    .p.name        = "concat",
+    .p.name        = "synchronize",
     .p.description = NULL_IF_CONFIG_SMALL("Synchronize audio and video streams via PTS and wallclock."),
     .p.inputs      = NULL,
     .p.outputs     = NULL,

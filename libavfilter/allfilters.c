@@ -605,6 +605,7 @@ extern const FFFilter ff_avf_showvolume;
 extern const FFFilter ff_avf_showwaves;
 extern const FFFilter ff_avf_showwavespic;
 extern const FFFilter ff_vaf_spectrumsynth;
+extern const FFFilter ff_avf_synchronize;
 
 /* multimedia sources */
 extern const FFFilter ff_avsrc_avsynctest;
