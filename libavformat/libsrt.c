@@ -193,15 +193,28 @@ static int libsrt_epoll_create(URLContext *h, int fd, int write)
 
 static int libsrt_network_wait_fd(URLContext *h, int eid, int write)
 {
+    SRTContext *s = h->priv_data;
     int ret, len = 1, errlen = 1;
     SRTSOCKET ready[1];
     SRTSOCKET error[1];
+    SRT_SOCKSTATUS status;
 
+    SRTSOCKET fd = s->fd;
+
+    /* clean up broken sockets so we do not end up asking to read forever */
+    switch (srt_getsockstate(fd)) {
+    case SRTS_BROKEN:
+    case SRTS_NONEXIST:
+    case SRTS_CLOSED:
+        return AVERROR(EIO);
+    }
+    
     if (write) {
         ret = srt_epoll_wait(eid, error, &errlen, ready, &len, POLLING_TIME, 0, 0, 0, 0);
     } else {
         ret = srt_epoll_wait(eid, ready, &len, error, &errlen, POLLING_TIME, 0, 0, 0, 0);
     }
+
     if (ret < 0) {
         if (srt_getlasterror(NULL) == SRT_ETIMEOUT)
             ret = AVERROR(EAGAIN);
