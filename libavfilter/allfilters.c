@@ -480,6 +480,7 @@ extern const AVFilter ff_vf_super2xsai;
 extern const AVFilter ff_vf_swaprect;
 extern const AVFilter ff_vf_swapuv;
 extern const AVFilter ff_vf_tblend;
+extern const AVFilter ff_vf_timestamp;
 extern const AVFilter ff_vf_telecine;
 extern const AVFilter ff_vf_thistogram;
 extern const AVFilter ff_vf_threshold;
