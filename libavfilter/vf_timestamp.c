@@ -7,6 +7,9 @@
 #include "formats.h"
 #include "video.h"
 #include <libavutil/frame.h>
+#include <libavutil/log.h>
+#include <sys/time.h>
+#include <time.h>
 
 static const AVOption timestamp_options[] ={
     { NULL }
@@ -31,19 +34,24 @@ static int config_props(AVFilterLink *inlink) {
 static int filter_frame(AVFilterLink *inlink, AVFrame *in) {
     AVFilterContext *ctx = inlink->dst;
     AVFilterLink *outlink = ctx->outputs[0];
+    struct timeval tv;
+    struct tm *t;
+    int64_t wall_ns;
 
-    AVFrameSideData *sd = av_frame_new_side_data(in, AV_FRAME_DATA_SEI_UNREGISTERED, 16+sizeof(uint64_t)); /* you /need/ a UUID. */
+    AVFrameSideData *sd = av_frame_new_side_data(in, AV_FRAME_DATA_SEI_UNREGISTERED, 16+sizeof(uint64_t));
     if (!sd) {
         return AVERROR(ENOMEM);
     }
 
-    uint64_t data = 0xDEADBEEFULL;
+    gettimeofday(&tv, NULL);
+    t = localtime(&tv.tv_sec); /* hello timezone hell */
+    wall_ns =
+        ((int64_t)t->tm_hour * 3600 + (int64_t)t->tm_min * 60 + (int64_t)t->tm_sec) *
+        1000000000LL +
+        (int64_t)tv.tv_usec * 1000;
 
-    memset(sd->data, 0x42, 16); /* fake UUID */
-    memcpy(sd->data+16, &data, sizeof(uint64_t));
+    memcpy(sd->data, &wall_ns, sizeof(uint64_t));
 
-    av_log(ctx, AV_LOG_ERROR, "sd: %d\n", in->nb_side_data);
-    
     return ff_filter_frame(outlink, in);
 }
 
